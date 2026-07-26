@@ -3,15 +3,22 @@ schema: spec-driven
 context: |
   PCB Atelier is a desktop authoring workspace for PCB artwork.
   It combines asset management, content layers, basic non-destructive image
-  processing, PCB production-layer mapping, material preview, and EDA/Gerber
-  handoff. It is not a full electronics EDA or a full image editor.
+  processing, PCB production-layer mapping, 2D production preview, 3D material
+  preview, and EDA/Gerber handoff. It owns the repeated workflow between image
+  tools and EDA; it is not a full electronics EDA or a full image editor.
 
   Tech stack: Tauri 2, React, TypeScript, Tailwind CSS v4, shadcn/ui,
   an independent Rust core, and a CLI that shares the same core.
 
-  Production layers are the source of truth. Material preview, CLI output,
-  EasyEDA handoff, and Gerber export must use the same geometry, physical
-  dimensions, polarity, origin, and front/back orientation.
+  Production layers are the source of truth. 2D preview, 3D material preview,
+  CLI output, EasyEDA handoff, and Gerber export must use the same geometry,
+  physical dimensions, polarity, origin, and front/back orientation. Material
+  appearance may be approximate, but manufacturing geometry must remain exact.
+
+  Simple artwork should be able to produce a manufacturing package directly,
+  with EDA as an optional final review. Complex circuit, routing, or advanced
+  DRC work should hand off a reusable draft or production assets to EDA without
+  redoing image separation, layer composition, or placement.
 
   Reuse proven algorithms, export logic, tests, and icon assets from
   PCB_lightgraph Neo, but do not inherit its UI, project schema, or fixed
