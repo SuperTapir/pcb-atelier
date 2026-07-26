@@ -8,6 +8,17 @@ import {
 } from "@/features/workspace/production-inspection";
 
 describe("production inspection state", () => {
+  it("shows all physical production layers by default", () => {
+    const state = createProductionInspectionState();
+
+    expect(state.front.copper.visible).toBe(true);
+    expect(state.front.solderMaskOpen.visible).toBe(true);
+    expect(state.front.silkscreen.visible).toBe(true);
+    expect(state.back.copper.visible).toBe(true);
+    expect(state.back.solderMaskOpen.visible).toBe(true);
+    expect(state.back.silkscreen.visible).toBe(true);
+  });
+
   it("keeps temporary visibility independent per physical face", () => {
     const state = toggleProductionVisibility(
       createProductionInspectionState(),

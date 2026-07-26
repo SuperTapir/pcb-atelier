@@ -27,7 +27,7 @@ test("检查器提交精确毫米值，方向键按 0.1 mm 或 1 mm 微调", asy
   await expect(page.getByText("变换已更新", { exact: true })).toBeVisible();
 });
 
-test("无效尺寸回退，祖先锁定禁用检查器并阻止键盘变换", async ({ page }) => {
+test("无效尺寸回退，锁定对象禁用检查器并阻止键盘变换", async ({ page }) => {
   const tree = page.getByRole("tree", { name: "板体与生产层" });
   await selectLayer(tree, "正面说明");
   const width = page.getByRole("textbox", { name: "宽 (mm)" });
@@ -39,9 +39,9 @@ test("无效尺寸回退，祖先锁定禁用检查器并阻止键盘变换", as
   const group = tree.getByRole("treeitem").filter({ hasText: "正面组合" });
   await group
     .getByRole("button", { name: "正面组合", exact: true })
-    .click();
-  await group.getByRole("button", { name: "锁定对象" }).click();
-  await selectLayer(tree, "正面标题");
+    .click({ button: "right" });
+  await page.getByRole("button", { name: "锁定", exact: true }).click();
+  await expect(group).toHaveAttribute("aria-selected", "true");
 
   const x = page.getByRole("textbox", { name: "X (mm)" });
   await expect(x).toBeDisabled();

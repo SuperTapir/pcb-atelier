@@ -6,7 +6,8 @@ test("主题可切换、持久化，并在跟随系统时响应外观变化", as
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");
 
-  const theme = page.getByRole("combobox", { name: "界面主题" });
+  await page.getByRole("button", { name: "工程菜单" }).click();
+  let theme = page.getByRole("combobox", { name: "界面主题" });
   const lightBackground = await page.evaluate(
     () => getComputedStyle(document.body).backgroundColor,
   );
@@ -22,6 +23,8 @@ test("主题可切换、持久化，并在跟随系统时响应外观变化", as
   ).not.toBe(lightBackground);
 
   await page.reload();
+  await page.getByRole("button", { name: "工程菜单" }).click();
+  theme = page.getByRole("combobox", { name: "界面主题" });
   await expect(theme).toHaveValue("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 

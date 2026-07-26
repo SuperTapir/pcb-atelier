@@ -1,5 +1,6 @@
 use std::{
     path::{Path, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -457,6 +458,18 @@ impl WorkspaceService {
             "get_workspace_document" => {
                 return serialize_response(self.session.document_view(), false);
             }
+            "open_project" => self
+                .session
+                .open_project(decode_request(&args)?)
+                .and_then(to_json),
+            "new_project" => self
+                .session
+                .new_project(decode_request(&args)?)
+                .and_then(to_json),
+            "save_project" => {
+                self.session.save_project(decode_request(&args)?)?;
+                return serialize_response(self.session.document_view(), false);
+            }
             "get_system_fonts" => {
                 let mut families = system_font_families();
                 families.retain(|family| family != "sans-serif");
@@ -630,6 +643,32 @@ impl WorkspaceSession {
 
     fn document_view(&self) -> WorkspaceDocumentView {
         workspace_document_view(&self.bundle.document, &self.history)
+    }
+
+    fn open_project(
+        &mut self,
+        request: OpenProjectRequest,
+    ) -> Result<WorkspaceDocumentView, String> {
+        let bundle = ProjectBundle::open(Path::new(&request.path))
+            .map_err(|error| format!("无法打开 PCB Atelier 工程：{error}"))?;
+        self.bundle = bundle;
+        self.history = CommandHistory::default();
+        Ok(self.document_view())
+    }
+
+    fn new_project(&mut self, request: NewProjectRequest) -> Result<WorkspaceDocumentView, String> {
+        let document =
+            AtelierDocument::new_card(request.title, request.width_um, request.height_um);
+        document.validate().map_err(|error| error.to_string())?;
+        self.bundle = ProjectBundle::new(document);
+        self.history = CommandHistory::default();
+        Ok(self.document_view())
+    }
+
+    fn save_project(&self, request: SaveProjectRequest) -> Result<(), String> {
+        self.bundle
+            .save(Path::new(&request.path))
+            .map_err(|error| format!("无法保存 PCB Atelier 工程：{error}"))
     }
 
     fn insert_image(&mut self, request: ImageAssetRequest) -> Result<LayerMutationView, String> {
@@ -969,6 +1008,26 @@ fn production_preview(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct OpenProjectRequest {
+    path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewProjectRequest {
+    title: String,
+    width_um: u32,
+    height_um: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveProjectRequest {
+    path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ImageAssetRequest {
     side: CardSide,
     original_filename: String,
@@ -1138,13 +1197,86 @@ fn invoke_workspace_service(
     Ok(service.invoke(request))
 }
 
+#[tauri::command]
+fn open_easyeda_project(path: PathBuf) -> Result<(), String> {
+    let path = validated_easyeda_project_path(&path)?;
+    open_with_system(&path)
+}
+
+#[tauri::command]
+fn reveal_exported_project(path: PathBuf) -> Result<(), String> {
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("导出文件不存在或无法访问：{error}"))?;
+    reveal_with_system(&path)
+}
+
+fn validated_easyeda_project_path(path: &Path) -> Result<PathBuf, String> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("eprj2") {
+        return Err("只能使用嘉立创 EDA 打开 .eprj2 工程".to_owned());
+    }
+    path.canonicalize()
+        .map_err(|error| format!("嘉立创 EDA 工程不存在或无法访问：{error}"))
+}
+
+fn open_with_system(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法使用系统关联程序打开嘉立创 EDA 工程：{error}"))
+}
+
+fn reveal_with_system(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg("-R");
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg("/select,");
+        command
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = Command::new("xdg-open");
+
+    #[cfg(target_os = "linux")]
+    let target = path.parent().unwrap_or(path);
+    #[cfg(not(target_os = "linux"))]
+    let target = path;
+
+    command
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法在文件管理器中显示导出工程：{error}"))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(Mutex::new(WorkspaceService::new(
             initial_workspace_document(),
         )))
-        .invoke_handler(tauri::generate_handler![workspace_invoke])
+        .invoke_handler(tauri::generate_handler![
+            workspace_invoke,
+            open_easyeda_project,
+            reveal_exported_project
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run PCB Atelier desktop application");
 }
@@ -1961,6 +2093,115 @@ mod tests {
                 .expect("preview hash")
                 .len(),
             64
+        );
+    }
+
+    #[test]
+    fn opening_project_replaces_the_session_only_after_bundle_validation() {
+        let directory = tempfile::tempdir().expect("temporary project directory");
+        let project_path = directory.path().join("opened.pcba");
+        let opened_document = atelier_core::AtelierDocument::new_card("已打开工程", 48_000, 72_000);
+        atelier_core::ProjectBundle::new(opened_document)
+            .save(&project_path)
+            .expect("save project fixture");
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "原工程",
+            8_000,
+            12_000,
+        ));
+
+        let opened = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "open_project".to_owned(),
+            args: serde_json::json!({
+                "request": { "path": project_path }
+            }),
+        });
+
+        assert!(opened.error.is_none());
+        assert_eq!(opened.revision, 1);
+        assert_eq!(opened.payload["title"], "已打开工程");
+        assert_eq!(opened.payload["board"]["widthUm"], 48_000);
+        assert_eq!(opened.payload["history"]["canUndo"], false);
+
+        let invalid_path = directory.path().join("invalid.pcba");
+        std::fs::write(&invalid_path, b"not a project").expect("write invalid fixture");
+        let rejected = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "open_project".to_owned(),
+            args: serde_json::json!({
+                "request": { "path": invalid_path }
+            }),
+        });
+        assert!(rejected.error.is_some());
+        assert_eq!(rejected.revision, 1);
+
+        let current = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_workspace_document".to_owned(),
+            args: serde_json::json!({}),
+        });
+        assert_eq!(current.payload["title"], "已打开工程");
+    }
+
+    #[test]
+    fn new_project_can_be_saved_and_reopened_as_a_valid_bundle() {
+        let directory = tempfile::tempdir().expect("temporary project directory");
+        let project_path = directory.path().join("new-card.pcba");
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "原工程",
+            8_000,
+            12_000,
+        ));
+
+        let created = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "new_project".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "title": "新卡片",
+                    "widthUm": 64_000,
+                    "heightUm": 100_000
+                }
+            }),
+        });
+        assert!(created.error.is_none());
+        assert_eq!(created.payload["title"], "新卡片");
+        assert_eq!(created.payload["board"]["heightUm"], 100_000);
+
+        let saved = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "save_project".to_owned(),
+            args: serde_json::json!({
+                "request": { "path": project_path }
+            }),
+        });
+        assert!(saved.error.is_none());
+        assert_eq!(
+            saved.revision, created.revision,
+            "saving must not change document revision"
+        );
+        let reopened =
+            atelier_core::ProjectBundle::open(&project_path).expect("reopen saved project");
+        assert_eq!(reopened.document.title, "新卡片");
+        assert_eq!(reopened.document.board.height_um(), 100_000);
+    }
+
+    #[test]
+    fn external_easyeda_open_only_accepts_an_existing_native_project() {
+        let directory = tempfile::tempdir().expect("temporary export directory");
+        let wrong_extension = directory.path().join("project.txt");
+        std::fs::write(&wrong_extension, b"fixture").expect("write fixture");
+        assert!(super::validated_easyeda_project_path(&wrong_extension).is_err());
+
+        let missing = directory.path().join("missing.eprj2");
+        assert!(super::validated_easyeda_project_path(&missing).is_err());
+
+        let project = directory.path().join("artwork.eprj2");
+        std::fs::write(&project, b"fixture").expect("write native fixture");
+        assert_eq!(
+            super::validated_easyeda_project_path(&project).expect("valid project path"),
+            project.canonicalize().expect("canonical project path")
         );
     }
 

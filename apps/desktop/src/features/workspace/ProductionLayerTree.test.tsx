@@ -64,9 +64,13 @@ describe("ProductionLayerTree", () => {
     expect(markup).toContain("板体");
     expect(markup).toContain("正面");
     expect(markup).toContain("背面");
-    expect(markup.match(/铜层/g)).toHaveLength(2);
-    expect(markup.match(/阻焊开窗/g)).toHaveLength(2);
-    expect(markup.match(/丝印层/g)).toHaveLength(2);
+    for (const face of ["front", "back"]) {
+      for (const context of ["copper", "solderMaskOpen", "silkscreen"]) {
+        expect(markup).toContain(
+          `data-testid="production-context-${face}-${context}"`,
+        );
+      }
+    }
     expect(markup).not.toContain(">内容<");
   });
 
@@ -76,6 +80,14 @@ describe("ProductionLayerTree", () => {
     expect(markup).toContain("Logo");
     expect(markup).toContain("关联");
     expect(markup).toContain("同一源对象 source-1");
+  });
+
+  it("keeps production-layer expansion separate from the focused work layer", () => {
+    const markup = renderToStaticMarkup(<ProductionLayerTree {...baseProps} />);
+
+    expect(markup).toContain('aria-label="收起正面铜层"');
+    expect(markup).toContain('aria-label="展开正面阻焊开窗"');
+    expect(markup).toContain('aria-label="展开正面丝印层"');
   });
 
   it("offers board fill only inside an active copper container", () => {

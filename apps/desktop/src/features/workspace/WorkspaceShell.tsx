@@ -12,6 +12,8 @@ import {
   Box,
   ChevronDown,
   Columns2,
+  FolderOpen,
+  FilePlus2,
   ImagePlus,
   Layers3,
   MousePointer2,
@@ -19,6 +21,7 @@ import {
   Pencil,
   Redo2,
   RotateCcw,
+  Save,
   Type,
   Undo2,
   Ungroup,
@@ -63,14 +66,19 @@ import {
   insertImageAsset,
   insertTextLayer,
   createBoardFill,
+  createNewAtelierProject,
   getBoardPreview,
   getProductionPreview,
   getSystemFonts,
   getWorkspaceDocument,
   groupLayers,
   mapLayer,
+  isDesktopRuntime,
+  openAtelierProject,
   redoWorkspace,
   reorderLayer,
+  selectAtelierProjectFile,
+  selectAtelierSaveFile,
   setLayerLock,
   setLayerName,
   setLayerExportEnabled,
@@ -79,6 +87,7 @@ import {
   setStackup,
   setTextContent,
   setTextStyle,
+  saveAtelierProject,
   transformLayer,
   unmapLayer,
   ungroupLayer,
@@ -128,6 +137,9 @@ export function WorkspaceShell({
     useTheme();
   const [sessionDocument, setSessionDocument] =
     useState<WorkspaceDocument>(initialDocument);
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [showProjectHome, setShowProjectHome] = useState(isDesktopRuntime);
   const [workspace, dispatch] = useReducer(
     workspaceReducer,
     undefined,
@@ -490,6 +502,98 @@ export function WorkspaceShell({
     }
   };
 
+  const activateProject = (
+    document: WorkspaceDocument,
+    path: string | null,
+  ) => {
+    setSessionDocument(document);
+    setProjectPath(path);
+    setEditingLayerId(null);
+    setReplaceLayerId(null);
+    setDrillGroupIds({ front: null, back: null });
+    setProductionInspection(createProductionInspectionState());
+    setBoardPreview(null);
+    setProductionPreview(null);
+    dispatch({ type: "setSelection", face: "front", layerIds: [] });
+    dispatch({ type: "setSelection", face: "back", layerIds: [] });
+    dispatch({ type: "resetViewport", face: "front" });
+    dispatch({ type: "resetViewport", face: "back" });
+    dispatch({ type: "setFace", face: "front" });
+    setProjectMenuOpen(false);
+    setShowProjectHome(false);
+  };
+
+  const confirmDiscardIfNeeded = () =>
+    !sessionDocument.history.canUndo ||
+    globalThis.confirm("当前工程有未保存修改，是否丢弃并继续？");
+
+  const handleOpenProject = async () => {
+    if (!confirmDiscardIfNeeded()) return;
+    const path = await selectAtelierProjectFile();
+    if (!path) return;
+    setStatus("正在打开工程…");
+    try {
+      const document = await openAtelierProject(path);
+      activateProject(document, path);
+      setStatus(`已打开工程：${document.title}`);
+    } catch (error) {
+      setStatus(`打开工程失败：${errorMessage(error)}`);
+    }
+  };
+
+  const handleNewProject = async () => {
+    if (!confirmDiscardIfNeeded()) return;
+    setStatus("正在新建工程…");
+    try {
+      const document = await createNewAtelierProject();
+      activateProject(document, null);
+      setStatus("已新建标准卡片工程");
+    } catch (error) {
+      setStatus(`新建工程失败：${errorMessage(error)}`);
+    }
+  };
+
+  const handleSaveProject = async (saveAs = false) => {
+    let path = saveAs ? null : projectPath;
+    if (!path) {
+      path = await selectAtelierSaveFile(sessionDocument.title);
+    }
+    if (!path) return;
+    setStatus("正在保存工程…");
+    try {
+      const document = await saveAtelierProject(path);
+      setSessionDocument(document);
+      setProjectPath(path);
+      setProjectMenuOpen(false);
+      setStatus(`已保存工程：${path}`);
+    } catch (error) {
+      setStatus(`保存工程失败：${errorMessage(error)}`);
+    }
+  };
+
+  useEffect(() => {
+    const saveShortcut = (event: KeyboardEvent) => {
+      if (
+        event.key.toLowerCase() === "s" &&
+        (event.metaKey || event.ctrlKey)
+      ) {
+        event.preventDefault();
+        void handleSaveProject(event.shiftKey);
+      }
+    };
+    globalThis.addEventListener("keydown", saveShortcut);
+    return () => globalThis.removeEventListener("keydown", saveShortcut);
+  });
+
+  if (showProjectHome) {
+    return (
+      <ProjectHome
+        onNew={() => void handleNewProject()}
+        onOpen={() => void handleOpenProject()}
+      />
+    );
+  }
+
   return (
     <div
       className="grid h-screen min-h-[640px] grid-rows-[52px_minmax(0,1fr)_28px] overflow-hidden bg-background text-foreground"
@@ -525,17 +629,75 @@ export function WorkspaceShell({
       />
 
       <header className="grid grid-cols-[240px_minmax(0,1fr)_280px] border-b bg-card">
-        <div className="flex items-center gap-2.5 border-r px-3">
-          <div className="grid size-7 place-items-center rounded-md bg-primary text-[11px] font-bold tracking-tight text-primary-foreground">
-            PA
-          </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold">
-              {sessionDocument.title}
-            </p>
-            <p className="text-[10px] text-muted-foreground">PCB Atelier</p>
-          </div>
-          <ChevronDown className="ml-auto size-3.5 text-muted-foreground" />
+        <div className="relative border-r">
+          <button
+            aria-expanded={projectMenuOpen}
+            aria-label="工程菜单"
+            className="flex h-full w-full items-center gap-2.5 px-3 text-left hover:bg-accent/50"
+            onClick={() => setProjectMenuOpen((open) => !open)}
+            type="button"
+          >
+            <div className="grid size-7 place-items-center rounded-md bg-primary text-[11px] font-bold tracking-tight text-primary-foreground">
+              PA
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold">
+                {sessionDocument.title}
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                {projectPath ? "已保存到本地" : "尚未保存"}
+              </p>
+            </div>
+            <ChevronDown className="ml-auto size-3.5 text-muted-foreground" />
+          </button>
+          {projectMenuOpen && (
+            <div
+              aria-label="工程操作"
+              className="absolute left-2 top-[46px] z-50 w-56 rounded-lg border bg-popover p-1.5 text-popover-foreground shadow-lg"
+              role="menu"
+            >
+              <ProjectMenuItem
+                icon={FilePlus2}
+                label="新建工程"
+                onClick={() => void handleNewProject()}
+              />
+              <ProjectMenuItem
+                icon={FolderOpen}
+                label="打开工程…"
+                onClick={() => void handleOpenProject()}
+              />
+              <div className="my-1 border-t" />
+              <ProjectMenuItem
+                icon={Save}
+                label="保存"
+                onClick={() => void handleSaveProject()}
+                shortcut="⌘S"
+              />
+              <ProjectMenuItem
+                icon={Save}
+                label="另存为…"
+                onClick={() => void handleSaveProject(true)}
+              />
+              <div className="my-1 border-t" />
+              <label className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] text-muted-foreground">
+                <span className="flex-1">外观</span>
+                <select
+                  aria-label="界面主题"
+                  className="h-7 rounded border bg-background px-1.5 text-[10px] text-foreground"
+                  onChange={(event) =>
+                    setThemePreference(
+                      event.currentTarget.value as ThemePreference,
+                    )
+                  }
+                  value={themePreference}
+                >
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                </select>
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="flex min-w-0 items-center justify-between gap-3 px-3">
@@ -645,21 +807,6 @@ export function WorkspaceShell({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-l px-3">
-          <select
-            aria-label="界面主题"
-            className="h-8 rounded-md border bg-background px-2 text-[11px] text-foreground"
-            onChange={(event) =>
-              setThemePreference(
-                event.currentTarget.value as ThemePreference,
-              )
-            }
-            title="界面主题"
-            value={themePreference}
-          >
-            <option value="system">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
           <ExportEasyedaButton onStatus={setStatus} />
         </div>
       </header>
@@ -701,21 +848,41 @@ export function WorkspaceShell({
                     }
                   })()
                 }
-                onMove={(face, layerId, direction) => {
+                onReorder={(
+                  face,
+                  layerId,
+                  targetLayerId,
+                  placement,
+                ) => {
                   const layers =
                     face === "front"
                       ? sessionDocument.frontLayers
                       : sessionDocument.backLayers;
-                  const index = layers.findIndex(
+                  const sourceIndex = layers.findIndex(
                     (layer) => layer.id === layerId,
                   );
-                  const nextIndex = Math.max(
-                    0,
-                    Math.min(layers.length - 1, index + direction),
+                  const targetIndex = layers.findIndex(
+                    (layer) => layer.id === targetLayerId,
                   );
-                  if (index !== nextIndex) {
+                  const source = layers[sourceIndex];
+                  if (
+                    sourceIndex < 0 ||
+                    targetIndex < 0 ||
+                    !source
+                  ) {
+                    return;
+                  }
+                  let nextIndex =
+                    targetIndex + (placement === "after" ? 1 : 0);
+                  if (sourceIndex < nextIndex) nextIndex -= 1;
+                  if (sourceIndex !== nextIndex) {
                     void applyDocumentMutation(
-                      () => reorderLayer(layerId, null, nextIndex),
+                      () =>
+                        reorderLayer(
+                          layerId,
+                          source.parentId,
+                          nextIndex,
+                        ),
                       "图层顺序已更新",
                     );
                   }
@@ -884,6 +1051,14 @@ export function WorkspaceShell({
                       onCommitText={(layerId, text) =>
                         void handleCommitText(layerId, text)
                       }
+                      onClearSelection={() => {
+                        setEditingLayerId(null);
+                        dispatch({
+                          type: "setSelection",
+                          face,
+                          layerIds: [],
+                        });
+                      }}
                       onCreateText={(draft) =>
                         void handleCreateText(face, draft)
                       }
@@ -1652,6 +1827,86 @@ function TransformInput({
 
 function formatThousandths(value: number) {
   return (value / 1_000).toFixed(3);
+}
+
+export function ProjectHome({
+  onNew,
+  onOpen,
+}: {
+  onNew: () => void;
+  onOpen: () => void;
+}) {
+  return (
+    <main className="grid min-h-screen place-items-center bg-workspace p-8 text-foreground">
+      <section className="w-full max-w-2xl rounded-2xl border bg-card p-8 shadow-sm">
+        <div className="mb-8 flex items-center gap-3">
+          <div className="grid size-11 place-items-center rounded-xl bg-primary text-sm font-bold text-primary-foreground">
+            PA
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold">PCB Atelier</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              从一张新的双面艺术卡开始，或继续已有工程
+            </p>
+          </div>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <button
+            className="group rounded-xl border bg-background p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent/40"
+            onClick={onNew}
+            type="button"
+          >
+            <FilePlus2 className="size-6 text-primary" />
+            <span className="mt-5 block text-sm font-semibold">新建工程</span>
+            <span className="mt-1 block text-[11px] leading-5 text-muted-foreground">
+              创建 64 × 100 mm 的标准双面卡片，尺寸可在板体检查器中调整
+            </span>
+          </button>
+          <button
+            className="group rounded-xl border bg-background p-5 text-left transition-colors hover:border-primary/50 hover:bg-accent/40"
+            onClick={onOpen}
+            type="button"
+          >
+            <FolderOpen className="size-6 text-primary" />
+            <span className="mt-5 block text-sm font-semibold">打开工程</span>
+            <span className="mt-1 block text-[11px] leading-5 text-muted-foreground">
+              打开保存在 Mac 上的 PCB Atelier `.pcba` 工程
+            </span>
+          </button>
+        </div>
+        <p className="mt-8 border-t pt-5 text-[11px] text-muted-foreground">
+          嘉立创 EDA 工程是下游交付格式；请在编辑器中导出后使用嘉立创 EDA 打开。
+        </p>
+      </section>
+    </main>
+  );
+}
+
+function ProjectMenuItem({
+  icon: Icon,
+  label,
+  onClick,
+  shortcut,
+}: {
+  icon: typeof MousePointer2;
+  label: string;
+  onClick: () => void;
+  shortcut?: string;
+}) {
+  return (
+    <button
+      className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[11px] hover:bg-accent"
+      onClick={onClick}
+      role="menuitem"
+      type="button"
+    >
+      <Icon className="size-3.5 text-muted-foreground" />
+      <span className="flex-1">{label}</span>
+      {shortcut && (
+        <span className="text-[9px] text-muted-foreground">{shortcut}</span>
+      )}
+    </button>
+  );
 }
 
 function PreviewLoading() {

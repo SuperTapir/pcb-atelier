@@ -11,6 +11,10 @@ TBD - created by archiving change add-card-editor-foundation. Update Purpose aft
 - **WHEN** 用户导出符合首版限制的双层艺术卡
 - **THEN** 系统必须生成可由嘉立创 EDA 打开的工程产物，并报告产物路径与导出版本
 
+#### Scenario: 导出后打开工程
+- **WHEN** 嘉立创 EDA 工程成功导出
+- **THEN** 客户端必须提供“使用嘉立创 EDA 打开”和“在文件管理器中显示”操作；打开失败必须保留导出产物并显示可理解的错误
+
 ### Requirement: 导出前检查
 系统 MUST 在导出前检查不支持的层、映射、板框或机械特征，并在无法无损交接时明确失败；
 系统不得静默丢弃内容或将底层内容写入错误层。
@@ -34,4 +38,3 @@ TBD - created by archiving change add-card-editor-foundation. Update Purpose aft
 #### Scenario: 重新导出已在 EDA 修改过的工程
 - **WHEN** 用户在 EDA 中修改一个先前导出的工程后，从未改变的 PCB Atelier 工程再次导出
 - **THEN** 系统必须创建新的下游导出版本，并保持 PCB Atelier 源工程不变
-

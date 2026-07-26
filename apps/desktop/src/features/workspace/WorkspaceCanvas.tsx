@@ -70,6 +70,7 @@ interface WorkspaceCanvasProps {
   onEnterGroup: (layerId: string) => void;
   onCommitText: (layerId: string, text: string) => void;
   onCreateText: (draft: TextDraft) => void;
+  onClearSelection: () => void;
   onSelect: (
     layerId: string,
     modifiers: {
@@ -113,6 +114,7 @@ export function WorkspaceCanvas({
   onEnterGroup,
   onCommitText,
   onCreateText,
+  onClearSelection,
   onSelect,
   onTransformLayer,
   onViewportChange,
@@ -122,6 +124,7 @@ export function WorkspaceCanvas({
     pointer: Point;
     viewport: CanvasViewport;
   } | null>(null);
+  const activeAtPointerDownRef = useRef(active);
   const textStartRef = useRef<Point | null>(null);
   const [size, setSize] = useState<CanvasSize>({ width: 0, height: 0 });
   const [pointerMm, setPointerMm] = useState<Point | null>(null);
@@ -165,7 +168,17 @@ export function WorkspaceCanvas({
   const handleMouseDown = (event: KonvaEventObject<MouseEvent>) => {
     const pointer = event.target.getStage()?.getPointerPosition();
     if (!pointer) return;
-    if (!event.target.hasName("pan-surface")) return;
+    const isPanSurface = event.target.hasName("pan-surface");
+    if (
+      shouldClearCanvasSelection(
+        tool,
+        isPanSurface,
+        activeAtPointerDownRef.current,
+      )
+    ) {
+      onClearSelection();
+    }
+    if (!isPanSurface) return;
     if (tool !== "select") return;
     panStartRef.current = { pointer, viewport };
     setIsPanning(true);
@@ -236,6 +249,7 @@ export function WorkspaceCanvas({
       data-face={face}
       data-testid={`workspace-canvas-${face}`}
       onMouseDownCapture={(event) => {
+        activeAtPointerDownRef.current = active;
         onActivate();
         if (
           tool !== "text" ||
@@ -468,6 +482,14 @@ export function WorkspaceCanvas({
       </div>
     </div>
   );
+}
+
+export function shouldClearCanvasSelection(
+  tool: WorkspaceTool,
+  isPanSurface: boolean,
+  active: boolean,
+) {
+  return active && tool === "select" && isPanSurface;
 }
 
 function ContentNode({

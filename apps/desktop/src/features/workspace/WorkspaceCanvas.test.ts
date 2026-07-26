@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { displayedXToBoardX } from "@/features/workspace/WorkspaceCanvas";
+import {
+  displayedXToBoardX,
+  shouldClearCanvasSelection,
+} from "@/features/workspace/WorkspaceCanvas";
 
 describe("back-face view transform", () => {
   it("keeps both editing faces in upright physical coordinates", () => {
@@ -12,5 +15,14 @@ describe("back-face view transform", () => {
     const physicalX = 17;
     const displayedX = displayedXToBoardX(physicalX, "back", 64);
     expect(displayedX).toBe(physicalX);
+  });
+});
+
+describe("canvas blank selection", () => {
+  it("clears selection only on an already-active canvas with the select tool", () => {
+    expect(shouldClearCanvasSelection("select", true, true)).toBe(true);
+    expect(shouldClearCanvasSelection("select", true, false)).toBe(false);
+    expect(shouldClearCanvasSelection("text", true, true)).toBe(false);
+    expect(shouldClearCanvasSelection("select", false, true)).toBe(false);
   });
 });

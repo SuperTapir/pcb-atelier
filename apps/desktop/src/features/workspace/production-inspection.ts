@@ -58,6 +58,10 @@ export function toggleProductionIsolation(
         candidate,
         {
           ...state[face][candidate],
+          visible:
+            nextIsolated && candidate === layer
+              ? true
+              : state[face][candidate].visible,
           isolated: nextIsolated && candidate === layer,
         },
       ]),

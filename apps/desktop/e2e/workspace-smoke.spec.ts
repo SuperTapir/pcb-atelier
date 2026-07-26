@@ -14,6 +14,12 @@ test("编辑模式默认同时显示正反双画板，点击画板切换活动�
   const front = page.getByTestId("workspace-canvas-front");
   const back = page.getByTestId("workspace-canvas-back");
 
+  await page.getByRole("button", { name: "工程菜单" }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "打开工程…" }),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "保存 ⌘S" })).toBeVisible();
+  await page.getByRole("button", { name: "工程菜单" }).click();
   await expect(front).toBeVisible();
   await expect(back).toBeVisible();
   await expect(front).toHaveAttribute("data-edit-orientation", "upright");
@@ -37,6 +43,34 @@ test("左侧只显示板体与正背生产层，不暴露独立内容入口", as
   await expect(tree.getByRole("group", { name: "正面" })).toBeVisible();
   await expect(tree.getByRole("group", { name: "背面" })).toBeVisible();
   await expect(tree.getByText("内容", { exact: true })).toHaveCount(0);
+});
+
+test("生产层可以同时展开，展开状态与当前编辑焦点彼此独立", async ({
+  page,
+}) => {
+  await page.getByTestId("production-context-front-copper").click();
+  await page.getByTestId("production-context-front-solderMaskOpen").click();
+
+  await expect(
+    page.getByRole("button", { name: "收起正面铜层" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByRole("button", { name: "收起正面阻焊开窗" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByRole("button", { name: "收起正面丝印层" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByTestId("production-context-front-solderMaskOpen"),
+  ).toHaveAttribute("aria-pressed", "true");
+
+  await page.getByRole("button", { name: "收起正面铜层" }).click();
+  await expect(
+    page.getByRole("button", { name: "展开正面铜层" }),
+  ).toHaveAttribute("aria-expanded", "false");
+  await expect(
+    page.getByTestId("production-context-front-solderMaskOpen"),
+  ).toHaveAttribute("aria-pressed", "true");
 });
 
 test("正反两面的选择状态在活动卡面切换后分别保留", async ({ page }) => {
@@ -67,15 +101,41 @@ test("正反两面的选择状态在活动卡面切换后分别保留", async ({
   ).toContainText("正面说明");
 });
 
-test("对象图层可在左侧双击重命名并通过撤销恢复", async ({ page }) => {
+test("生产层默认全部显示，点击画板空白取消选择框", async ({
+  page,
+}) => {
+  const tree = page.getByRole("tree", { name: "板体与生产层" });
+  const frontTitle = tree
+    .getByRole("treeitem")
+    .filter({ hasText: "正面说明" });
+  await expect(
+    tree.getByRole("button", { name: "隐藏正面铜层", exact: true }),
+  ).toBeVisible();
+
+  await frontTitle
+    .getByRole("button", { name: "正面说明", exact: true })
+    .click();
+  await expect(frontTitle).toHaveAttribute("aria-selected", "true");
+
+  const canvas = page.getByTestId("workspace-canvas-front");
+  const bounds = await canvas.boundingBox();
+  if (!bounds) throw new Error("正面画板不可见");
+  await canvas.click({ position: { x: 16, y: bounds.height - 16 } });
+  await expect(frontTitle).toHaveAttribute("aria-selected", "false");
+});
+
+test("对象图层可在左侧按 Return 重命名并通过撤销恢复", async ({ page }) => {
   const tree = page.getByRole("tree", { name: "板体与生产层" });
   const source = tree
     .getByRole("treeitem")
     .filter({ hasText: "正面说明" });
 
-  await source
-    .getByRole("button", { name: "正面说明", exact: true })
-    .dblclick();
+  const layerName = source.getByRole("button", {
+    name: "正面说明",
+    exact: true,
+  });
+  await layerName.click();
+  await layerName.press("Enter");
   const editor = tree.getByRole("textbox", { name: "重命名 正面说明" });
   await expect(editor).toBeVisible();
   await editor.fill("正面副标题");
@@ -88,6 +148,36 @@ test("对象图层可在左侧双击重命名并通过撤销恢复", async ({ pa
   await expect(
     tree.getByRole("button", { name: "正面说明", exact: true }),
   ).toBeVisible();
+});
+
+test("对象行支持右键菜单与同级拖拽排序，不再提供上下移动按钮", async ({
+  page,
+}) => {
+  const tree = page.getByRole("tree", { name: "板体与生产层" });
+  const title = tree
+    .getByRole("treeitem")
+    .filter({ hasText: "背面标记" });
+  const caption = tree
+    .getByRole("treeitem")
+    .filter({ hasText: "背面说明" });
+
+  await title
+    .getByRole("button", { name: "背面标记", exact: true })
+    .click({ button: "right" });
+  await expect(page.getByRole("button", { name: "重命名" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "上移" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "下移" })).toHaveCount(0);
+
+  await page.getByTestId("board-root").click();
+  await expect(page.getByRole("button", { name: "重命名" })).toBeHidden();
+  await title
+    .getByRole("button", { name: "背面标记", exact: true })
+    .click({ button: "right" });
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "重命名" })).toBeHidden();
+
+  await title.dragTo(caption);
+  await expect(page.getByRole("status")).toContainText("图层顺序已更新");
 });
 
 test("聚焦当前面只隐藏非活动画板，恢复同时查看后活动面不变", async ({
@@ -356,7 +446,10 @@ test("同一对象可关联多层且仍保持同一来源身份", async ({ page 
 
   await page.getByTestId("production-context-back-copper").click();
   await expect(
-    tree.getByRole("treeitem").filter({ hasText: "背面说明" }),
+    page
+      .getByTestId("production-layer-back-copper")
+      .getByRole("treeitem")
+      .filter({ hasText: "背面说明" }),
   ).toContainText("关联");
 
   await copper.click();

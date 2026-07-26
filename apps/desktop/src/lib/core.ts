@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   BoardPreviewInput,
   BoardPreviewOutline,
@@ -251,7 +251,13 @@ interface WorkspaceBridgeResponse<T> {
 }
 
 function isTauriRuntime(): boolean {
-  return "__TAURI_INTERNALS__" in window;
+  return (
+    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+  );
+}
+
+export function isDesktopRuntime(): boolean {
+  return isTauriRuntime();
 }
 
 async function invokeLocalBridge<T>(
@@ -298,6 +304,65 @@ export async function selectEasyedaOutputDirectory(): Promise<string | null> {
     title: "选择嘉立创 EDA 导出目录",
   });
   return typeof selected === "string" ? selected : null;
+}
+
+export async function selectAtelierProjectFile(): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const selected = await open({
+    directory: false,
+    filters: [{ name: "PCB Atelier 工程", extensions: ["pcba"] }],
+    multiple: false,
+    title: "打开 PCB Atelier 工程",
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export function openAtelierProject(path: string): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("open_project", {
+    request: { path },
+  });
+}
+
+export function createNewAtelierProject(
+  title = "未命名卡片",
+  widthUm = 64_000,
+  heightUm = 100_000,
+): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("new_project", {
+    request: { title, widthUm, heightUm },
+  });
+}
+
+export async function selectAtelierSaveFile(
+  defaultName: string,
+): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const selected = await save({
+    defaultPath: `${defaultName.replace(/[/:]/g, "-")}.pcba`,
+    filters: [{ name: "PCB Atelier 工程", extensions: ["pcba"] }],
+    title: "保存 PCB Atelier 工程",
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
+export function saveAtelierProject(path: string): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("save_project", {
+    request: { path },
+  });
+}
+
+export function openEasyedaProject(path: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("仅桌面客户端支持调用嘉立创 EDA"));
+  }
+  return invoke<void>("open_easyeda_project", { path });
+}
+
+export function revealExportedProject(path: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return Promise.reject(new Error("仅桌面客户端支持在文件管理器中显示"));
+  }
+  return invoke<void>("reveal_exported_project", { path });
 }
 
 export function exportEasyeda(

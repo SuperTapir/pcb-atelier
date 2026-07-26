@@ -1,7 +1,7 @@
 import {
-  ArrowDown,
-  ArrowUp,
   BoxSelect,
+  ChevronDown,
+  ChevronRight,
   CircuitBoard,
   Eye,
   EyeOff,
@@ -9,12 +9,20 @@ import {
   Layers3,
   Link2,
   Lock,
+  MoreHorizontal,
   Paintbrush,
+  Pencil,
   Scan,
   Trash2,
   Unlock,
 } from "lucide-react";
-import { useState, type MouseEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useState,
+  type DragEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 
 import type {
   CardFace,
@@ -40,7 +48,12 @@ interface ProductionLayerTreeProps {
   mappings: ProductionMapping[];
   selectedIds: FaceSelections;
   onCreateBoardFill: (face: CardFace) => void;
-  onMove?: (face: CardFace, layerId: string, direction: -1 | 1) => void;
+  onReorder?: (
+    face: CardFace,
+    layerId: string,
+    targetLayerId: string,
+    placement: "before" | "after",
+  ) => void;
   onRename?: (layer: ContentLayer, name: string) => void;
   onRemoveMapping?: (mappingId: string) => void;
   onSelectBoard: () => void;
@@ -99,7 +112,7 @@ export function ProductionLayerTree({
   mappings,
   selectedIds,
   onCreateBoardFill,
-  onMove,
+  onReorder,
   onRename,
   onRemoveMapping,
   onSelectBoard,
@@ -113,6 +126,64 @@ export function ProductionLayerTree({
   const associationCount = countMappingsBySource(mappings);
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [dragging, setDragging] = useState<{
+    face: CardFace;
+    context: WorkContext;
+    layerId: string;
+    parentId: string | null;
+  } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    layerId: string;
+    placement: "before" | "after";
+  } | null>(null);
+  const [expanded, setExpanded] = useState<
+    Record<CardFace, Set<WorkContext>>
+  >(() => ({
+    front: new Set([contexts.front]),
+    back: new Set([contexts.back]),
+  }));
+
+  useEffect(() => {
+    setExpanded((current) => ({
+      ...current,
+      [activeFace]: new Set([
+        ...current[activeFace],
+        contexts[activeFace],
+      ]),
+    }));
+  }, [activeFace, contexts]);
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest("details[data-layer-actions]")
+      ) {
+        return;
+      }
+      closeLayerActionMenus();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeLayerActionMenus();
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("blur", closeLayerActionMenus);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("blur", closeLayerActionMenus);
+    };
+  }, []);
+
+  const toggleExpanded = (face: CardFace, context: WorkContext) => {
+    setExpanded((current) => {
+      const next = new Set(current[face]);
+      if (next.has(context)) next.delete(context);
+      else next.add(context);
+      return { ...current, [face]: next };
+    });
+  };
 
   const beginRename = (layer: ContentLayer) => {
     if (layer.locked || !onRename) return;
@@ -131,8 +202,8 @@ export function ProductionLayerTree({
       <button
         aria-selected={boardSelected}
         className={cn(
-          "flex w-full items-center gap-2 rounded-lg border bg-card/40 px-2.5 py-2 text-left text-[11px]",
-          boardSelected && "border-primary/45 bg-primary/5",
+          "flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[11px] hover:bg-accent",
+          boardSelected && "bg-accent text-foreground",
         )}
         data-testid="board-root"
         onClick={onSelectBoard}
@@ -149,24 +220,22 @@ export function ProductionLayerTree({
       {FACES.map((face) => (
         <section
           aria-label={face.label}
-          className={cn(
-            "rounded-lg border bg-card/25",
-            activeFace === face.id && "border-primary/30",
-          )}
+          className="border-t"
           key={face.id}
           role="group"
         >
-          <div className="flex items-center justify-between border-b px-2.5 py-1.5">
+          <div className="flex h-7 items-center justify-between px-2">
             <span className="text-[11px] font-semibold">{face.label}</span>
             <span className="text-[9px] text-muted-foreground">
               {face.physicalLabel}
             </span>
           </div>
 
-          <div className="space-y-0.5 p-1">
+          <div className="pb-1">
             {PRODUCTION_NODES.map((node) => {
               const active =
                 activeFace === face.id && contexts[face.id] === node.context;
+              const isExpanded = expanded[face.id].has(node.context);
               const inspectionState = inspection?.[face.id][node.context] ?? {
                 visible: true,
                 isolated: false,
@@ -181,68 +250,79 @@ export function ProductionLayerTree({
               return (
                 <div
                   className={cn(
-                    "rounded-md",
-                    active && "bg-primary/5 ring-1 ring-primary/30",
+                    "rounded-sm",
+                    active && "bg-primary/8",
                   )}
+                  data-testid={`production-layer-${face.id}-${node.context}`}
                   key={node.context}
                 >
-                  <button
-                    aria-pressed={active}
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left"
-                    data-testid={`production-context-${face.id}-${node.context}`}
-                    onClick={() => onSelectContext(face.id, node.context)}
-                    role="treeitem"
-                    type="button"
-                  >
-                    <node.icon className="size-3.5 text-muted-foreground" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block text-[11px] font-medium">
+                  <div className="group/layer flex h-8 items-center">
+                    <button
+                      aria-expanded={isExpanded}
+                      aria-label={`${isExpanded ? "收起" : "展开"}${face.label}${node.label}`}
+                      className="ml-0.5 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                      onClick={() => toggleExpanded(face.id, node.context)}
+                      type="button"
+                    >
+                      {isExpanded ? (
+                        <ChevronDown className="size-3.5" />
+                      ) : (
+                        <ChevronRight className="size-3.5" />
+                      )}
+                    </button>
+                    <button
+                      aria-pressed={active}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 self-stretch text-left"
+                      data-testid={`production-context-${face.id}-${node.context}`}
+                      onClick={() => onSelectContext(face.id, node.context)}
+                      role="treeitem"
+                      title={node.hint}
+                      type="button"
+                    >
+                      <node.icon className="size-3.5 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
                         {node.label}
                       </span>
-                      <span className="block truncate text-[9px] text-muted-foreground">
-                        {node.hint}
-                      </span>
-                    </span>
-                    {inspectionState.visible ? (
-                      <Eye className="size-3 text-muted-foreground/60" />
-                    ) : (
-                      <EyeOff className="size-3 text-muted-foreground/60" />
-                    )}
-                  </button>
+                      {active && (
+                        <span className="text-[8px] text-primary">焦点</span>
+                      )}
+                    </button>
+                    <button
+                      aria-label={`${inspectionState.visible ? "隐藏" : "显示"}${face.label}${node.label}`}
+                      className="flex size-7 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
+                      onClick={() =>
+                        onToggleProductionVisibility?.(face.id, node.context)
+                      }
+                      type="button"
+                    >
+                      {inspectionState.visible ? (
+                        <Eye className="size-3.5" />
+                      ) : (
+                        <EyeOff className="size-3.5" />
+                      )}
+                    </button>
+                    <button
+                      aria-label={`${inspectionState.isolated ? "取消隔离" : "隔离"}${face.label}${node.label}`}
+                      aria-pressed={inspectionState.isolated}
+                      className={cn(
+                        "mr-0.5 flex size-7 shrink-0 items-center justify-center text-muted-foreground opacity-0 hover:text-foreground group-hover/layer:opacity-100 focus:opacity-100",
+                        inspectionState.isolated &&
+                          "text-primary opacity-100",
+                      )}
+                      onClick={() =>
+                        onToggleIsolation?.(face.id, node.context)
+                      }
+                      type="button"
+                    >
+                      <Scan className="size-3.5" />
+                    </button>
+                  </div>
 
-                  {active && (
-                    <div className="border-t border-border/60 px-1.5 py-1.5">
-                      <div className="mb-1 grid grid-cols-2 gap-1">
-                        <SmallAction
-                          active={inspectionState.visible}
-                          label={
-                            inspectionState.visible ? "显示中" : "已隐藏"
-                          }
-                          onClick={() =>
-                            onToggleProductionVisibility?.(
-                              face.id,
-                              node.context,
-                            )
-                          }
-                        >
-                          {inspectionState.visible ? <Eye /> : <EyeOff />}
-                        </SmallAction>
-                        <SmallAction
-                          active={inspectionState.isolated}
-                          label={
-                            inspectionState.isolated ? "取消隔离" : "隔离"
-                          }
-                          onClick={() =>
-                            onToggleIsolation?.(face.id, node.context)
-                          }
-                        >
-                          <Scan />
-                        </SmallAction>
-                      </div>
-
+                  {isExpanded && (
+                    <div className="pb-1 pl-6 pr-1">
                       {entries.length === 0 ? (
-                        <p className="px-1 py-1 text-[10px] text-muted-foreground">
-                          当前生产层暂无对象
+                        <p className="h-6 px-2 text-[9px] leading-6 text-muted-foreground/70">
+                          无对象
                         </p>
                       ) : (
                         entries.map(({ layer, mapping, inherited }) => (
@@ -251,11 +331,91 @@ export function ProductionLayerTree({
                               layer.id,
                             )}
                             className={cn(
-                              "group flex min-h-7 items-center rounded text-[10px] hover:bg-accent",
+                              "group relative flex min-h-7 items-center rounded text-[10px] hover:bg-accent",
                               selectedIds[face.id].includes(layer.id) &&
                                 "bg-accent",
+                              dropTarget?.layerId === layer.id &&
+                                dropTarget.placement === "before" &&
+                                "before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-primary",
+                              dropTarget?.layerId === layer.id &&
+                                dropTarget.placement === "after" &&
+                                "after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-primary",
                             )}
+                            draggable={!layer.locked}
                             key={`${node.context}-${layer.id}`}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              onSelectSource(face.id, layer.id, event);
+                              closeLayerActionMenus();
+                              event.currentTarget
+                                .querySelector<HTMLDetailsElement>(
+                                  "details[data-layer-actions]",
+                                )
+                                ?.setAttribute("open", "");
+                            }}
+                            onDragEnd={() => {
+                              setDragging(null);
+                              setDropTarget(null);
+                            }}
+                            onDragOver={(event) => {
+                              if (
+                                !canDropLayer(
+                                  dragging,
+                                  face.id,
+                                  node.context,
+                                  layer,
+                                )
+                              ) {
+                                return;
+                              }
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = "move";
+                              const bounds =
+                                event.currentTarget.getBoundingClientRect();
+                              setDropTarget({
+                                layerId: layer.id,
+                                placement:
+                                  event.clientY < bounds.top + bounds.height / 2
+                                    ? "before"
+                                    : "after",
+                              });
+                            }}
+                            onDragStart={(event) => {
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData(
+                                "text/plain",
+                                layer.id,
+                              );
+                              setDragging({
+                                face: face.id,
+                                context: node.context,
+                                layerId: layer.id,
+                                parentId: layer.parentId,
+                              });
+                            }}
+                            onDrop={(event) => {
+                              if (
+                                !dropTarget ||
+                                !dragging ||
+                                !canDropLayer(
+                                  dragging,
+                                  face.id,
+                                  node.context,
+                                  layer,
+                                )
+                              ) {
+                                return;
+                              }
+                              event.preventDefault();
+                              onReorder?.(
+                                face.id,
+                                dragging.layerId,
+                                layer.id,
+                                dropTarget.placement,
+                              );
+                              setDragging(null);
+                              setDropTarget(null);
+                            }}
                             role="treeitem"
                             style={{ paddingLeft: layer.parentId ? 14 : 2 }}
                           >
@@ -287,6 +447,17 @@ export function ProductionLayerTree({
                                   onSelectSource(face.id, layer.id, event)
                                 }
                                 onDoubleClick={() => beginRename(layer)}
+                                onKeyDown={(event) => {
+                                  if (
+                                    (event.key === "Enter" ||
+                                      event.key === "F2") &&
+                                    selectedIds[face.id].includes(layer.id)
+                                  ) {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    beginRename(layer);
+                                  }
+                                }}
                                 title={
                                   layer.locked
                                     ? layer.name
@@ -315,53 +486,48 @@ export function ProductionLayerTree({
                               </button>
                             )}
                             <TreeAction
+                              persistent
                               label={layer.visible ? "隐藏对象" : "显示对象"}
                               onClick={() => onToggleVisibility?.(layer)}
                             >
                               {layer.visible ? <Eye /> : <EyeOff />}
                             </TreeAction>
-                            <TreeAction
-                              label={layer.locked ? "解锁对象" : "锁定对象"}
-                              onClick={() => onToggleLock?.(layer)}
-                            >
-                              {layer.locked ? <Lock /> : <Unlock />}
-                            </TreeAction>
-                            <TreeAction
-                              label="上移对象"
-                              onClick={() =>
-                                onMove?.(face.id, layer.id, 1)
-                              }
-                            >
-                              <ArrowUp />
-                            </TreeAction>
-                            <TreeAction
-                              label="下移对象"
-                              onClick={() =>
-                                onMove?.(face.id, layer.id, -1)
-                              }
-                            >
-                              <ArrowDown />
-                            </TreeAction>
-                            {!inherited && mapping && onRemoveMapping && (
+                            {layer.locked && (
                               <TreeAction
-                                label={`移除 ${layer.name} 生产层关联`}
-                                onClick={() => onRemoveMapping(mapping.id)}
+                                persistent
+                                label="解锁对象"
+                                onClick={() => onToggleLock?.(layer)}
                               >
-                                <Trash2 />
+                                <Lock />
                               </TreeAction>
                             )}
+                            <LayerActionsMenu
+                              canRemoveMapping={
+                                !inherited &&
+                                Boolean(mapping && onRemoveMapping)
+                              }
+                              locked={layer.locked}
+                              name={layer.name}
+                              onRemoveMapping={() =>
+                                mapping && onRemoveMapping?.(mapping.id)
+                              }
+                              onRename={() => beginRename(layer)}
+                              onToggleLock={() => onToggleLock?.(layer)}
+                              renameEnabled={!layer.locked && Boolean(onRename)}
+                            />
                           </div>
                         ))
                       )}
 
                       {node.context === "copper" && (
                         <button
-                          className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed px-2 py-1.5 text-[10px] text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                          aria-label="添加基础铺铜"
+                          className="flex h-6 items-center gap-1 px-2 text-[9px] text-muted-foreground hover:text-foreground"
                           onClick={() => onCreateBoardFill(face.id)}
                           type="button"
                         >
-                          <Focus className="size-3" />
-                          添加基础铺铜
+                          <Focus className="size-2.5" />
+                          + 基础铺铜
                         </button>
                       )}
                     </div>
@@ -441,25 +607,105 @@ function countMappingsBySource(mappings: ProductionMapping[]) {
   return counts;
 }
 
-function SmallAction({
-  active,
-  children,
+function closeLayerActionMenus() {
+  document
+    .querySelectorAll<HTMLDetailsElement>(
+      "details[data-layer-actions][open]",
+    )
+    .forEach((details) => details.removeAttribute("open"));
+}
+
+function canDropLayer(
+  dragging: {
+    face: CardFace;
+    context: WorkContext;
+    layerId: string;
+    parentId: string | null;
+  } | null,
+  face: CardFace,
+  context: WorkContext,
+  target: ContentLayer,
+) {
+  return Boolean(
+    dragging &&
+      dragging.face === face &&
+      dragging.context === context &&
+      dragging.layerId !== target.id &&
+      dragging.parentId === target.parentId,
+  );
+}
+
+function LayerActionsMenu({
+  canRemoveMapping,
+  locked,
+  name,
+  onRemoveMapping,
+  onRename,
+  onToggleLock,
+  renameEnabled,
+}: {
+  canRemoveMapping: boolean;
+  locked: boolean;
+  name: string;
+  onRemoveMapping: () => void;
+  onRename: () => void;
+  onToggleLock: () => void;
+  renameEnabled: boolean;
+}) {
+  return (
+    <details className="relative shrink-0" data-layer-actions>
+      <summary
+        aria-label={`${name} 更多操作`}
+        className="grid size-6 cursor-pointer list-none place-items-center text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-70 focus:opacity-100 [&::-webkit-details-marker]:hidden"
+      >
+        <MoreHorizontal className="size-3" />
+      </summary>
+      <div className="absolute right-0 top-6 z-30 w-28 rounded-md border border-border bg-card p-1 text-card-foreground shadow-xl">
+        <LayerMenuAction
+          disabled={!renameEnabled}
+          icon={<Pencil />}
+          label="重命名"
+          onClick={onRename}
+        />
+        <LayerMenuAction
+          icon={locked ? <Unlock /> : <Lock />}
+          label={locked ? "解锁" : "锁定"}
+          onClick={onToggleLock}
+        />
+        {canRemoveMapping && (
+          <LayerMenuAction
+            icon={<Trash2 />}
+            label="移除关联"
+            onClick={onRemoveMapping}
+          />
+        )}
+      </div>
+    </details>
+  );
+}
+
+function LayerMenuAction({
+  disabled = false,
+  icon,
   label,
   onClick,
 }: {
-  active: boolean;
-  children: ReactNode;
+  disabled?: boolean;
+  icon: ReactNode;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      aria-pressed={active}
-      className="flex items-center justify-center gap-1 rounded px-1 py-1 text-[9px] text-muted-foreground hover:bg-accent [&_svg]:size-2.5"
-      onClick={onClick}
+      className="flex h-7 w-full items-center gap-2 rounded px-2 text-left text-[10px] hover:bg-accent disabled:opacity-40 [&_svg]:size-3"
+      disabled={disabled}
+      onClick={(event) => {
+        onClick();
+        event.currentTarget.closest("details")?.removeAttribute("open");
+      }}
       type="button"
     >
-      {children}
+      {icon}
       {label}
     </button>
   );
@@ -469,15 +715,22 @@ function TreeAction({
   children,
   label,
   onClick,
+  persistent = false,
 }: {
   children: ReactNode;
   label: string;
   onClick: () => void;
+  persistent?: boolean;
 }) {
   return (
     <button
       aria-label={label}
-      className="grid size-6 shrink-0 place-items-center text-muted-foreground opacity-50 hover:text-foreground hover:opacity-100 [&_svg]:size-2.5"
+      className={cn(
+        "grid size-6 shrink-0 place-items-center text-muted-foreground hover:text-foreground [&_svg]:size-2.5",
+        persistent
+          ? "opacity-60 hover:opacity-100"
+          : "opacity-0 group-hover:opacity-60 focus:opacity-100 hover:opacity-100",
+      )}
       onClick={onClick}
       type="button"
     >
