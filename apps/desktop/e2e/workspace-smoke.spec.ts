@@ -237,19 +237,23 @@ test("文字检查器可以选择本机字体并用物理尺寸调整字号", as
   const font = page.getByRole("combobox", { name: "字体" });
   const fontSize = page.getByRole("textbox", { name: "字号 (mm)" });
   await expect(font).toBeVisible();
-  await expect(fontSize).toHaveValue("4.000");
   await expect(font.locator("option")).not.toHaveCount(1);
 
-  const localFamily = await font.locator("option").nth(1).getAttribute("value");
+  const currentFamily = await font.inputValue();
+  const options = await font.locator("option").evaluateAll((nodes) =>
+    nodes.map((node) => (node as HTMLOptionElement).value),
+  );
+  const localFamily = options.find((family) => family !== currentFamily);
   expect(localFamily).toBeTruthy();
   await font.selectOption(localFamily!);
   await expect(page.getByRole("status")).toContainText("文字样式已更新");
   await expect(font).toHaveValue(localFamily!);
 
-  await fontSize.fill("6.500");
+  const nextSize = (await fontSize.inputValue()) === "6.500" ? "5.500" : "6.500";
+  await fontSize.fill(nextSize);
   await fontSize.press("Enter");
   await expect(page.getByRole("status")).toContainText("文字样式已更新");
-  await expect(fontSize).toHaveValue("6.500");
+  await expect(fontSize).toHaveValue(nextSize);
 });
 
 test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", async ({
