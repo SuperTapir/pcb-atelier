@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 import { Group, Image as KonvaImage } from "react-konva";
 
 import {
@@ -53,7 +53,7 @@ function ProductionTexture({
   texture: ProductionLayerTexture;
   widthMm: number;
 }) {
-  const image = useMemo(() => textureCanvas(texture), [texture]);
+  const image = useTextureImage(texture);
   if (!image) return null;
   return (
     <KonvaImage
@@ -66,25 +66,26 @@ function ProductionTexture({
   );
 }
 
-function textureCanvas(
+function useTextureImage(
   texture: ProductionLayerTexture,
-): HTMLCanvasElement | undefined {
-  if (typeof document === "undefined") return undefined;
-  const canvas = document.createElement("canvas");
-  canvas.width = texture.widthPx;
-  canvas.height = texture.heightPx;
-  const context = canvas.getContext("2d");
-  if (!context) return undefined;
-  context.putImageData(
-    new ImageData(
-      Uint8ClampedArray.from(texture.rgba),
-      texture.widthPx,
-      texture.heightPx,
-    ),
-    0,
-    0,
-  );
-  return canvas;
+): HTMLImageElement | undefined {
+  const [image, setImage] = useState<HTMLImageElement>();
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let active = true;
+    const nextImage = new window.Image();
+    nextImage.onload = () => {
+      if (active) setImage(nextImage);
+    };
+    nextImage.src = texture.pngDataUrl;
+    return () => {
+      active = false;
+      nextImage.onload = null;
+    };
+  }, [texture.pngDataUrl]);
+
+  return image;
 }
 
 export const konvaProductionRenderer: ProductionRenderer = {

@@ -14,7 +14,7 @@ import {
   Trash2,
   Unlock,
 } from "lucide-react";
-import type { MouseEvent, ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 
 import type {
   CardFace,
@@ -41,6 +41,7 @@ interface ProductionLayerTreeProps {
   selectedIds: FaceSelections;
   onCreateBoardFill: (face: CardFace) => void;
   onMove?: (face: CardFace, layerId: string, direction: -1 | 1) => void;
+  onRename?: (layer: ContentLayer, name: string) => void;
   onRemoveMapping?: (mappingId: string) => void;
   onSelectBoard: () => void;
   onSelectContext: (face: CardFace, context: WorkContext) => void;
@@ -99,6 +100,7 @@ export function ProductionLayerTree({
   selectedIds,
   onCreateBoardFill,
   onMove,
+  onRename,
   onRemoveMapping,
   onSelectBoard,
   onSelectContext,
@@ -109,6 +111,20 @@ export function ProductionLayerTree({
   onToggleVisibility,
 }: ProductionLayerTreeProps) {
   const associationCount = countMappingsBySource(mappings);
+  const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  const beginRename = (layer: ContentLayer) => {
+    if (layer.locked || !onRename) return;
+    setRenamingLayerId(layer.id);
+    setRenameDraft(layer.name);
+  };
+
+  const commitRename = (layer: ContentLayer) => {
+    const name = renameDraft.trim();
+    setRenamingLayerId(null);
+    if (name && name !== layer.name) onRename?.(layer, name);
+  };
 
   return (
     <div aria-label="板体与生产层" className="space-y-1" role="tree">
@@ -243,32 +259,61 @@ export function ProductionLayerTree({
                             role="treeitem"
                             style={{ paddingLeft: layer.parentId ? 14 : 2 }}
                           >
-                            <button
-                              className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-left"
-                              onClick={(event) =>
-                                onSelectSource(face.id, layer.id, event)
-                              }
-                              type="button"
-                            >
-                              <Layers3 className="size-3 shrink-0 text-muted-foreground" />
-                              <span className="min-w-0 flex-1 truncate">
-                                {layer.name}
-                              </span>
-                              {associationCount.get(layer.id)! > 1 && (
-                                <span
-                                  className="flex items-center gap-0.5 text-[8px] text-primary"
-                                  title={`同一源对象 ${layer.id}`}
-                                >
-                                  <Link2 className="size-2.5" />
-                                  关联
+                            {renamingLayerId === layer.id ? (
+                              <input
+                                aria-label={`重命名 ${layer.name}`}
+                                autoFocus
+                                className="mx-1 h-6 min-w-0 flex-1 rounded border bg-background px-1.5 text-[10px] outline-none focus:border-primary"
+                                onBlur={() => commitRename(layer)}
+                                onChange={(event) =>
+                                  setRenameDraft(event.currentTarget.value)
+                                }
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") {
+                                    event.preventDefault();
+                                    event.currentTarget.blur();
+                                  } else if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    setRenamingLayerId(null);
+                                  }
+                                }}
+                                value={renameDraft}
+                              />
+                            ) : (
+                              <button
+                                aria-label={layer.name}
+                                className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-left"
+                                onClick={(event) =>
+                                  onSelectSource(face.id, layer.id, event)
+                                }
+                                onDoubleClick={() => beginRename(layer)}
+                                title={
+                                  layer.locked
+                                    ? layer.name
+                                    : `${layer.name}（双击重命名）`
+                                }
+                                type="button"
+                              >
+                                <Layers3 className="size-3 shrink-0 text-muted-foreground" />
+                                <span className="min-w-0 flex-1 truncate">
+                                  {layer.name}
                                 </span>
-                              )}
-                              {mapping?.combine === "subtract" && (
-                                <span className="text-[8px] text-muted-foreground">
-                                  减少
-                                </span>
-                              )}
-                            </button>
+                                {associationCount.get(layer.id)! > 1 && (
+                                  <span
+                                    className="flex items-center gap-0.5 text-[8px] text-primary"
+                                    title={`同一源对象 ${layer.id}`}
+                                  >
+                                    <Link2 className="size-2.5" />
+                                    关联
+                                  </span>
+                                )}
+                                {mapping?.combine === "subtract" && (
+                                  <span className="text-[8px] text-muted-foreground">
+                                    减少
+                                  </span>
+                                )}
+                              </button>
+                            )}
                             <TreeAction
                               label={layer.visible ? "隐藏对象" : "显示对象"}
                               onClick={() => onToggleVisibility?.(layer)}
@@ -356,10 +401,29 @@ function entriesForProductionLayer(
     }
   }
 
-  return [...layers]
-    .reverse()
-    .filter((layer) => included.has(layer.id))
-    .map((layer) => ({
+  const includedLayers = layers.filter((layer) => included.has(layer.id));
+  const includedById = new Map(includedLayers.map((layer) => [layer.id, layer]));
+  const childrenByParent = new Map<string, ContentLayer[]>();
+  for (const layer of includedLayers) {
+    if (!layer.parentId || !includedById.has(layer.parentId)) continue;
+    const children = childrenByParent.get(layer.parentId) ?? [];
+    children.push(layer);
+    childrenByParent.set(layer.parentId, children);
+  }
+  const ordered: ContentLayer[] = [];
+  const append = (layer: ContentLayer) => {
+    ordered.push(layer);
+    for (const child of [...(childrenByParent.get(layer.id) ?? [])].reverse()) {
+      append(child);
+    }
+  };
+  for (const root of [...includedLayers]
+    .filter((layer) => !layer.parentId || !includedById.has(layer.parentId))
+    .reverse()) {
+    append(root);
+  }
+
+  return ordered.map((layer) => ({
       layer,
       mapping: directMappings.get(layer.id),
       inherited: !directMappings.has(layer.id),

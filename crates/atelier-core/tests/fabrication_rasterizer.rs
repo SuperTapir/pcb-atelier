@@ -164,6 +164,36 @@ fn chinese_text_uses_embedded_noto_font_and_is_reproducible() {
 }
 
 #[test]
+fn selected_system_font_participates_in_the_production_fingerprint() {
+    let Some(family) = atelier_core::system_font_families().into_iter().next() else {
+        return;
+    };
+    let default_bundle = ProjectBundle::new(atelier_core::AtelierDocument::new_card(
+        "默认字体",
+        60_000,
+        30_000,
+    ));
+    let mut document = atelier_core::AtelierDocument::new_card("本机字体", 60_000, 30_000);
+    let mut layer = ContentLayer::new_text(
+        "字体",
+        "Font",
+        TransformUm::rect(2_000, 2_000, 30_000, 10_000),
+    );
+    let atelier_core::ContentKind::Text(text) = &mut layer.kind else {
+        unreachable!()
+    };
+    text.font_family = family;
+    document.front.layers.push(layer);
+    let system_bundle = ProjectBundle::new(document);
+
+    let fallback =
+        ProjectBundleRasterizer::new(&default_bundle).expect("embedded fallback rasterizer");
+    let selected = ProjectBundleRasterizer::new(&system_bundle).expect("system font rasterizer");
+
+    assert_ne!(fallback.font_fingerprint(), selected.font_fingerprint());
+}
+
+#[test]
 fn fixed_frame_text_wraps_and_clips_while_explicit_newlines_advance() {
     let bundle = ProjectBundle::new(atelier_core::AtelierDocument::new_card(
         "text frame",

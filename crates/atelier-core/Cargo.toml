@@ -11,6 +11,7 @@ serde_json.workspace = true
 aes-gcm.workspace = true
 flate2.workspace = true
 fontdue.workspace = true
+fontdb.workspace = true
 image.workspace = true
 rand.workspace = true
 rusqlite.workspace = true

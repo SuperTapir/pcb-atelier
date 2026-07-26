@@ -1,16 +1,21 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use atelier_core::{
     AssetId, AssetReference, AtelierDocument, BoardOutline, CardSide, CombineMode, CommandHistory,
     CommandOutcome, ContentKind, ContentLayer, DocumentCommand, DocumentDiagnostic,
     EasyedaHandoffExportReport, FaceProductionLayer, ImageContent, LayerId, MappingId,
-    ProductionLayerPreviewTexture, ProductionMapping, ProductionTarget, ProjectBundle,
-    ProjectBundleRasterizer, ResolvedFabricationBoard, ResolvedPreviewTextures, StackupPreset,
-    TextContent, TextLayout, TransformUm, compile_fabrication_plan, export_easyeda_handoff,
-    resolve_fabrication_plan,
+    PreviewPalette, PreviewTexture, ProductionLayerPreviewTexture, ProductionMapping,
+    ProductionTarget, ProjectBundle, ProjectBundleRasterizer, ResolvedFabricationBoard,
+    StackupPreset, TextContent, TextLayout, TransformUm, compile_fabrication_plan,
+    export_easyeda_handoff, resolve_fabrication_plan, system_font_families,
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use image::{
+    ExtendedColorType, ImageEncoder as _,
+    codecs::png::{CompressionType, FilterType, PngEncoder},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -137,7 +142,16 @@ struct HistoryAvailabilityView {
     can_redo: bool,
 }
 
-const INTERACTIVE_PREVIEW_PITCH_UM: u32 = 100;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FontCatalogView {
+    families: Vec<String>,
+    fallback_family: &'static str,
+}
+
+// Interactive previews trade manufacturing-grid detail for responsive inspection.
+// EasyEDA export remains fixed at `EASYEDA_EXPORT_PITCH_UM` (25 µm).
+const INTERACTIVE_PREVIEW_PITCH_UM: u32 = 200;
 const EASYEDA_EXPORT_PITCH_UM: u32 = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -147,7 +161,7 @@ struct BoardPreviewView {
     thickness_um: u32,
     fabrication_input_sha256: String,
     fabrication_output_sha256: String,
-    textures: ResolvedPreviewTextures,
+    textures: PreviewTexturesView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -158,7 +172,79 @@ struct ProductionPreviewView {
     fabrication_input_sha256: String,
     fabrication_output_sha256: String,
     pixel_pitch_um: u32,
-    textures: Vec<ProductionLayerPreviewTexture>,
+    textures: Vec<ProductionTextureView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewTexturesView {
+    palette: PreviewPalette,
+    front: PreviewTextureView,
+    back: PreviewTextureView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewTextureView {
+    side: CardSide,
+    width_px: u32,
+    height_px: u32,
+    png_data_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductionTextureView {
+    side: CardSide,
+    layer: FaceProductionLayer,
+    width_px: u32,
+    height_px: u32,
+    png_data_url: String,
+}
+
+impl PreviewTextureView {
+    fn from_texture(texture: PreviewTexture) -> Result<Self, String> {
+        Ok(Self {
+            side: texture.side,
+            width_px: texture.width_px,
+            height_px: texture.height_px,
+            png_data_url: rgba_png_data_url(texture.width_px, texture.height_px, texture.rgba)?,
+        })
+    }
+}
+
+impl ProductionTextureView {
+    fn from_texture(texture: ProductionLayerPreviewTexture) -> Result<Self, String> {
+        Ok(Self {
+            side: texture.side,
+            layer: texture.layer,
+            width_px: texture.width_px,
+            height_px: texture.height_px,
+            png_data_url: rgba_png_data_url(texture.width_px, texture.height_px, texture.rgba)?,
+        })
+    }
+}
+
+fn rgba_png_data_url(width_px: u32, height_px: u32, rgba: Vec<u8>) -> Result<String, String> {
+    let expected_len = u64::from(width_px)
+        .checked_mul(u64::from(height_px))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| format!("preview texture dimensions overflow: {width_px}x{height_px}"))?;
+    if rgba.len() != expected_len {
+        return Err(format!(
+            "invalid RGBA texture length for {width_px}x{height_px}: expected {expected_len}, got {}",
+            rgba.len()
+        ));
+    }
+    let mut png = Vec::new();
+    PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive)
+        .write_image(&rgba, width_px, height_px, ExtendedColorType::Rgba8)
+        .map_err(|error| format!("failed to encode preview PNG: {error}"))?;
+    Ok(format!(
+        "data:image/png;base64,{}",
+        BASE64_STANDARD.encode(png)
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -275,6 +361,19 @@ struct WorkspaceSession {
 pub struct WorkspaceService {
     session: WorkspaceSession,
     revision: u64,
+    resolved_board_cache: Arc<Mutex<ResolvedBoardCache>>,
+}
+
+#[derive(Debug, Default)]
+struct ResolvedBoardCache {
+    entry: Option<CachedResolvedBoard>,
+    resolution_count: u64,
+}
+
+#[derive(Debug)]
+struct CachedResolvedBoard {
+    revision: u64,
+    board: ResolvedFabricationBoard,
 }
 
 impl WorkspaceService {
@@ -282,6 +381,7 @@ impl WorkspaceService {
         Self {
             session: WorkspaceSession::new(document),
             revision: 0,
+            resolved_board_cache: Arc::new(Mutex::new(ResolvedBoardCache::default())),
         }
     }
 
@@ -316,11 +416,39 @@ impl WorkspaceService {
                 history: CommandHistory::default(),
             },
             revision: self.revision,
+            resolved_board_cache: Arc::clone(&self.resolved_board_cache),
         }
     }
 
     pub fn should_use_read_snapshot(command: &str) -> bool {
         matches!(command, "get_board_preview" | "get_production_preview")
+    }
+
+    fn resolved_interactive_board(&self) -> Result<ResolvedFabricationBoard, String> {
+        let mut cache = self
+            .resolved_board_cache
+            .lock()
+            .map_err(|_| "resolved board cache lock is poisoned".to_owned())?;
+        if let Some(entry) = &cache.entry
+            && entry.revision == self.revision
+        {
+            return Ok(entry.board.clone());
+        }
+        let board = self.session.resolve_interactive_board()?;
+        cache.resolution_count = cache.resolution_count.saturating_add(1);
+        cache.entry = Some(CachedResolvedBoard {
+            revision: self.revision,
+            board: board.clone(),
+        });
+        Ok(board)
+    }
+
+    #[cfg(test)]
+    fn preview_resolution_count(&self) -> u64 {
+        self.resolved_board_cache
+            .lock()
+            .expect("resolved board cache")
+            .resolution_count
     }
 
     fn dispatch(&mut self, command: &str, args: Value) -> Result<(Value, bool), String> {
@@ -329,11 +457,25 @@ impl WorkspaceService {
             "get_workspace_document" => {
                 return serialize_response(self.session.document_view(), false);
             }
+            "get_system_fonts" => {
+                let mut families = system_font_families();
+                families.retain(|family| family != "sans-serif");
+                families.insert(0, "sans-serif".to_owned());
+                return serialize_response(
+                    FontCatalogView {
+                        families,
+                        fallback_family: "sans-serif",
+                    },
+                    false,
+                );
+            }
             "get_board_preview" => {
-                return serialize_response(self.session.board_preview()?, false);
+                let resolved = self.resolved_interactive_board()?;
+                return serialize_response(board_preview(&resolved)?, false);
             }
             "get_production_preview" => {
-                return serialize_response(self.session.production_preview()?, false);
+                let resolved = self.resolved_interactive_board()?;
+                return serialize_response(production_preview(&resolved)?, false);
             }
             "get_asset_bytes" => {
                 let asset_id = serde_json::from_value(args["assetId"].clone())
@@ -352,6 +494,19 @@ impl WorkspaceService {
                 .session
                 .set_text(decode_request(&args)?)
                 .and_then(to_json),
+            "set_text_style" => self
+                .session
+                .set_text_style(decode_request(&args)?)
+                .and_then(to_json),
+            "set_layer_name" => {
+                let request: LayerNameRequest = decode_request(&args)?;
+                self.session
+                    .execute(DocumentCommand::SetLayerName {
+                        layer_id: request.layer_id,
+                        name: request.name,
+                    })
+                    .and_then(to_json)
+            }
             "transform_layer" => {
                 let request: TransformLayerRequest = decode_request(&args)?;
                 self.session
@@ -582,6 +737,38 @@ impl WorkspaceSession {
         Ok(self.document_view())
     }
 
+    fn set_text_style(
+        &mut self,
+        request: SetTextStyleRequest,
+    ) -> Result<WorkspaceDocumentView, String> {
+        if request.font_family.trim().is_empty() {
+            return Err("font family must not be empty".to_owned());
+        }
+        if request.font_size_um == 0 {
+            return Err("font size must be positive".to_owned());
+        }
+        let existing = find_layer(&self.bundle.document, request.layer_id)
+            .ok_or_else(|| format!("content layer not found: {}", request.layer_id))?;
+        let ContentKind::Text(existing_text) = &existing.kind else {
+            return Err(format!("content layer {} is not text", request.layer_id));
+        };
+        let text = TextContent {
+            font_family: request.font_family,
+            font_size_um: request.font_size_um,
+            ..existing_text.clone()
+        };
+        self.history
+            .execute(
+                &mut self.bundle.document,
+                DocumentCommand::SetTextContent {
+                    layer_id: request.layer_id,
+                    text,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(self.document_view())
+    }
+
     fn asset_bytes(&self, asset_id: AssetId) -> Result<AssetBytesView, String> {
         let reference = self
             .bundle
@@ -597,35 +784,6 @@ impl WorkspaceSession {
         Ok(AssetBytesView {
             media_type: reference.media_type.clone(),
             bytes: bytes.to_vec(),
-        })
-    }
-
-    fn board_preview(&self) -> Result<BoardPreviewView, String> {
-        let resolved = self.resolve_interactive_board()?;
-        let textures = resolved
-            .preview_textures()
-            .map_err(|error| error.to_string())?;
-        Ok(BoardPreviewView {
-            outline: BoardOutlineView::from(&resolved.outline),
-            thickness_um: resolved.stackup.thickness_um,
-            fabrication_input_sha256: resolved.build.input_sha256,
-            fabrication_output_sha256: resolved.build.output_sha256,
-            textures,
-        })
-    }
-
-    fn production_preview(&self) -> Result<ProductionPreviewView, String> {
-        let resolved = self.resolve_interactive_board()?;
-        let textures = resolved
-            .production_layer_textures()
-            .map_err(|error| error.to_string())?;
-        Ok(ProductionPreviewView {
-            source: "resolvedFabricationBoard",
-            outline: BoardOutlineView::from(&resolved.outline),
-            fabrication_input_sha256: resolved.build.input_sha256,
-            fabrication_output_sha256: resolved.build.output_sha256,
-            pixel_pitch_um: resolved.grid.pixel_pitch_um,
-            textures,
         })
     }
 
@@ -773,6 +931,42 @@ impl WorkspaceSession {
     }
 }
 
+fn board_preview(resolved: &ResolvedFabricationBoard) -> Result<BoardPreviewView, String> {
+    let textures = resolved
+        .preview_textures()
+        .map_err(|error| error.to_string())?;
+    Ok(BoardPreviewView {
+        outline: BoardOutlineView::from(&resolved.outline),
+        thickness_um: resolved.stackup.thickness_um,
+        fabrication_input_sha256: resolved.build.input_sha256.clone(),
+        fabrication_output_sha256: resolved.build.output_sha256.clone(),
+        textures: PreviewTexturesView {
+            palette: textures.palette,
+            front: PreviewTextureView::from_texture(textures.front)?,
+            back: PreviewTextureView::from_texture(textures.back)?,
+        },
+    })
+}
+
+fn production_preview(
+    resolved: &ResolvedFabricationBoard,
+) -> Result<ProductionPreviewView, String> {
+    let textures = resolved
+        .production_layer_textures()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(ProductionTextureView::from_texture)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ProductionPreviewView {
+        source: "resolvedFabricationBoard",
+        outline: BoardOutlineView::from(&resolved.outline),
+        fabrication_input_sha256: resolved.build.input_sha256.clone(),
+        fabrication_output_sha256: resolved.build.output_sha256.clone(),
+        pixel_pitch_um: resolved.grid.pixel_pitch_um,
+        textures,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ImageAssetRequest {
@@ -805,8 +999,23 @@ struct SetTextRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetTextStyleRequest {
+    layer_id: LayerId,
+    font_family: String,
+    font_size_um: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LayerIdRequest {
     layer_id: LayerId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LayerNameRequest {
+    layer_id: LayerId,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -896,10 +1105,19 @@ struct AssetBytesView {
 }
 
 #[tauri::command]
-fn workspace_invoke(
+async fn workspace_invoke(
     request: WorkspaceBridgeRequest,
     service: tauri::State<'_, Mutex<WorkspaceService>>,
 ) -> Result<WorkspaceBridgeResponse, String> {
+    if WorkspaceService::should_use_read_snapshot(&request.command) {
+        let mut snapshot = service
+            .lock()
+            .map_err(|_| "workspace service lock is poisoned".to_owned())?
+            .snapshot_for_read();
+        return tauri::async_runtime::spawn_blocking(move || snapshot.invoke(request))
+            .await
+            .map_err(|error| format!("workspace preview task failed: {error}"));
+    }
     invoke_workspace_service(&service, request)
 }
 
@@ -1121,6 +1339,13 @@ mod tests {
                 text: "新的文字".to_owned(),
             })
             .expect("text update should succeed");
+        session
+            .set_text_style(super::SetTextStyleRequest {
+                layer_id: inserted.layer_id,
+                font_family: "PingFang SC".to_owned(),
+                font_size_um: 6_500,
+            })
+            .expect("text style update should succeed");
         let layer = &session.bundle.document.front.layers[0];
         let atelier_core::ContentKind::Text(text) = &layer.kind else {
             panic!("inserted layer should be text");
@@ -1128,11 +1353,29 @@ mod tests {
 
         assert_eq!(text.text, "新的文字");
         assert_eq!(text.layout, atelier_core::TextLayout::FixedFrame);
+        assert_eq!(text.font_family, "PingFang SC");
+        assert_eq!(text.font_size_um, 6_500);
         assert_eq!(
             layer.transform,
             atelier_core::TransformUm::rect(7_000, 9_000, 24_000, 12_000)
         );
-        assert_eq!(session.history.undo_depth(), 2);
+        assert_eq!(session.history.undo_depth(), 3);
+    }
+
+    #[test]
+    fn system_font_catalog_keeps_the_embedded_fallback_available() {
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "字体", 64_000, 100_000,
+        ));
+        let response = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_system_fonts".to_owned(),
+            args: serde_json::json!({}),
+        });
+
+        assert!(response.error.is_none());
+        assert_eq!(response.payload["fallbackFamily"], "sans-serif");
+        assert_eq!(response.payload["families"][0], "sans-serif");
     }
 
     #[test]
@@ -1444,8 +1687,8 @@ mod tests {
         );
         assert_eq!(document_response.revision, 0);
         assert!(document_response.error.is_none());
-        assert_eq!(preview.payload["textures"]["front"]["widthPx"], 80);
-        assert_eq!(preview.payload["textures"]["front"]["heightPx"], 120);
+        assert_eq!(preview.payload["textures"]["front"]["widthPx"], 40);
+        assert_eq!(preview.payload["textures"]["front"]["heightPx"], 60);
         assert_ne!(preview.payload["textures"]["front"]["widthPx"], 8);
         assert_ne!(preview.payload["textures"]["front"]["heightPx"], 5);
         assert_eq!(
@@ -1482,6 +1725,66 @@ mod tests {
         )
         .expect("thin Tauri adapter");
         assert_eq!(tauri_response, preview);
+    }
+
+    #[test]
+    fn preview_transport_uses_png_data_urls_and_reflects_solder_mask_color_changes() {
+        use base64::Engine as _;
+
+        fn first_pixel(data_url: &str) -> image::Rgba<u8> {
+            let encoded = data_url
+                .strip_prefix("data:image/png;base64,")
+                .expect("PNG data URL prefix");
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("base64 PNG");
+            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .expect("decode PNG")
+                .to_rgba8()
+                .get_pixel(0, 0)
+                .to_owned()
+        }
+
+        let mut document = atelier_core::AtelierDocument::new_card("Mask preview", 2_000, 2_000);
+        document.stackup.solder_mask_color = SolderMaskColor::Black;
+        let mut white_stackup = document.stackup.clone();
+        white_stackup.solder_mask_color = SolderMaskColor::White;
+        let mut service = super::WorkspaceService::new(document);
+        let preview_request = || super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_board_preview".to_owned(),
+            args: serde_json::json!({}),
+        };
+
+        let black = service.invoke(preview_request());
+        let black_texture = &black.payload["textures"]["front"];
+        assert!(black_texture.get("rgba").is_none());
+        let black_pixel = first_pixel(
+            black_texture["pngDataUrl"]
+                .as_str()
+                .expect("front PNG data URL"),
+        );
+
+        let changed = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "set_stackup".to_owned(),
+            args: serde_json::json!({ "request": { "stackup": white_stackup } }),
+        });
+        assert!(changed.error.is_none());
+
+        let white = service.invoke(preview_request());
+        let white_pixel = first_pixel(
+            white.payload["textures"]["front"]["pngDataUrl"]
+                .as_str()
+                .expect("front PNG data URL"),
+        );
+        assert_ne!(black_pixel, white_pixel);
+        assert!(white_pixel.0[0] > black_pixel.0[0]);
+        assert_eq!(
+            service.preview_resolution_count(),
+            2,
+            "stackup mutation must invalidate the cached resolved board"
+        );
     }
 
     #[test]
@@ -1650,8 +1953,8 @@ mod tests {
         let preview = invoke("get_board_preview", serde_json::json!({}));
         assert!(preview.error.is_none());
         assert_eq!(preview.revision, 4);
-        assert_eq!(preview.payload["textures"]["front"]["widthPx"], 200);
-        assert_eq!(preview.payload["textures"]["front"]["heightPx"], 200);
+        assert_eq!(preview.payload["textures"]["front"]["widthPx"], 100);
+        assert_eq!(preview.payload["textures"]["front"]["heightPx"], 100);
         assert_eq!(
             preview.payload["fabricationOutputSha256"]
                 .as_str()
@@ -1669,6 +1972,11 @@ mod tests {
             12_000,
         ));
 
+        let board_preview = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_board_preview".to_owned(),
+            args: serde_json::json!({}),
+        });
         let preview = service.invoke(super::WorkspaceBridgeRequest {
             contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
             command: "get_production_preview".to_owned(),
@@ -1681,8 +1989,24 @@ mod tests {
             "preview reads must not advance revision"
         );
         assert_eq!(preview.payload["source"], "resolvedFabricationBoard");
+        assert_eq!(
+            preview.payload["fabricationInputSha256"],
+            board_preview.payload["fabricationInputSha256"]
+        );
+        assert_eq!(
+            preview.payload["fabricationOutputSha256"],
+            board_preview.payload["fabricationOutputSha256"]
+        );
+        assert_eq!(service.preview_resolution_count(), 1);
         assert_eq!(preview.payload["textures"].as_array().unwrap().len(), 6);
-        assert_eq!(preview.payload["pixelPitchUm"], 100);
+        assert!(
+            preview.payload["textures"][0]["pngDataUrl"]
+                .as_str()
+                .expect("production PNG data URL")
+                .starts_with("data:image/png;base64,")
+        );
+        assert!(preview.payload["textures"][0].get("rgba").is_none());
+        assert_eq!(preview.payload["pixelPitchUm"], 200);
         assert_eq!(preview.payload["outline"]["widthUm"], 8_000);
         assert_eq!(
             preview.payload["fabricationInputSha256"]
@@ -1698,6 +2022,96 @@ mod tests {
                 .len(),
             64
         );
+    }
+
+    #[test]
+    fn board_and_production_pngs_share_inserted_silkscreen_pixels() {
+        use base64::Engine as _;
+
+        fn decode_rgba(data_url: &str) -> image::RgbaImage {
+            let encoded = data_url
+                .strip_prefix("data:image/png;base64,")
+                .expect("PNG data URL prefix");
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("base64 PNG");
+            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .expect("decode PNG")
+                .to_rgba8()
+        }
+
+        let mut document = atelier_core::AtelierDocument::new_card("Mapped mark", 8_000, 12_000);
+        let mark =
+            ContentLayer::new_text("标记", "F", TransformUm::rect(1_000, 1_000, 4_000, 4_000));
+        let mark_id = mark.id;
+        document.front.layers.push(mark);
+        document.mappings.push(ProductionMapping::new(
+            mark_id,
+            ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen),
+            CombineMode::Add,
+        ));
+        let mut service = super::WorkspaceService::new(document);
+        let request = |command: &str| super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: command.to_owned(),
+            args: serde_json::json!({}),
+        };
+        let board = service.invoke(request("get_board_preview"));
+        let production = service.invoke(request("get_production_preview"));
+        let board_face = decode_rgba(
+            board.payload["textures"]["front"]["pngDataUrl"]
+                .as_str()
+                .expect("board face PNG"),
+        );
+        let silk = production.payload["textures"]
+            .as_array()
+            .expect("production textures")
+            .iter()
+            .find(|texture| texture["side"] == "front" && texture["layer"] == "silkscreen")
+            .expect("front silkscreen texture");
+        let silk_face = decode_rgba(silk["pngDataUrl"].as_str().expect("front silkscreen PNG"));
+        let mark_pixel = silk_face
+            .as_raw()
+            .chunks_exact(4)
+            .position(|pixel| pixel[3] != 0)
+            .expect("inserted text must produce silkscreen pixels");
+        assert_eq!(
+            &board_face.as_raw()[mark_pixel * 4..mark_pixel * 4 + 4],
+            &silk_face.as_raw()[mark_pixel * 4..mark_pixel * 4 + 4],
+            "3D board texture must show the exact compiled silkscreen pixel"
+        );
+        assert_eq!(
+            board.payload["fabricationOutputSha256"],
+            production.payload["fabricationOutputSha256"]
+        );
+    }
+
+    #[test]
+    fn workspace_service_renames_a_layer_through_the_shared_contract() {
+        let mut document = atelier_core::AtelierDocument::new_card("重命名", 64_000, 100_000);
+        let layer = ContentLayer::new_text(
+            "旧名称",
+            "内容",
+            TransformUm::rect(1_000, 1_000, 10_000, 4_000),
+        );
+        let layer_id = layer.id;
+        document.front.layers.push(layer);
+        let mut service = super::WorkspaceService::new(document);
+
+        let response = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "set_layer_name".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "layerId": layer_id,
+                    "name": "新名称"
+                }
+            }),
+        });
+
+        assert_eq!(response.error, None);
+        assert_eq!(response.payload["frontLayers"][0]["name"], "新名称");
+        assert_eq!(response.revision, 1);
     }
 
     fn asymmetric_export_session() -> super::WorkspaceSession {

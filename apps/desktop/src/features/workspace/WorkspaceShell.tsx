@@ -1,5 +1,6 @@
 import {
   lazy,
+  startTransition,
   Suspense,
   useCallback,
   useEffect,
@@ -30,6 +31,7 @@ import type { ProductionPreviewInput } from "@/features/preview/production-rende
 import { useTheme } from "@/features/theme/ThemeProvider";
 import type { ThemePreference } from "@/features/theme/theme-state";
 import {
+  applyGroupTransform,
   applyTransformPatch,
   isLayerTransformEditable,
   nudgeTransform,
@@ -63,17 +65,20 @@ import {
   createBoardFill,
   getBoardPreview,
   getProductionPreview,
+  getSystemFonts,
   getWorkspaceDocument,
   groupLayers,
   mapLayer,
   redoWorkspace,
   reorderLayer,
   setLayerLock,
+  setLayerName,
   setLayerExportEnabled,
   setLayerVisibility,
   setBoardOutline,
   setStackup,
   setTextContent,
+  setTextStyle,
   transformLayer,
   unmapLayer,
   ungroupLayer,
@@ -139,6 +144,7 @@ export function WorkspaceShell({
   );
   const [productionPreview, setProductionPreview] =
     useState<ProductionPreviewInput | null>(null);
+  const [fontFamilies, setFontFamilies] = useState<string[]>(["sans-serif"]);
   const productionPreviewRequestRef = useRef(0);
   const [drillGroupIds, setDrillGroupIds] = useState<
     Record<CardFace, string | null>
@@ -147,6 +153,20 @@ export function WorkspaceShell({
     createProductionInspectionState,
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    void getSystemFonts()
+      .then((catalog) => {
+        if (active) setFontFamilies(catalog.families);
+      })
+      .catch(() => {
+        // The embedded font remains available when system enumeration fails.
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   const pendingTransformsRef = useRef(
     new Map<string, ContentLayer["transform"]>(),
   );
@@ -215,6 +235,7 @@ export function WorkspaceShell({
   const applyDocumentMutation = useCallback(
     async (operation: () => Promise<WorkspaceDocument>, success: string) => {
       try {
+        setStatus("正在更新工程…");
         setSessionDocument(await operation());
         setStatus(success);
       } catch (error) {
@@ -227,16 +248,23 @@ export function WorkspaceShell({
   const applyLayerTransform = useCallback(
     (layerId: string, transform: ContentLayer["transform"]) => {
       pendingTransformsRef.current.set(layerId, transform);
-      setSessionDocument((current) => ({
-        ...current,
-        frontLayers: current.frontLayers.map((layer) =>
-          layer.id === layerId ? { ...layer, transform } : layer,
-        ),
-        backLayers: current.backLayers.map((layer) =>
-          layer.id === layerId ? { ...layer, transform } : layer,
-        ),
-        history: { ...current.history, canUndo: true, canRedo: false },
-      }));
+      setSessionDocument((current) => {
+        const updateLayers = (layers: ContentLayer[]) => {
+          const target = layers.find((layer) => layer.id === layerId);
+          if (target?.kind.type === "group") {
+            return applyGroupTransform(layers, layerId, transform);
+          }
+          return layers.map((layer) =>
+            layer.id === layerId ? { ...layer, transform } : layer,
+          );
+        };
+        return {
+          ...current,
+          frontLayers: updateLayers(current.frontLayers),
+          backLayers: updateLayers(current.backLayers),
+          history: { ...current.history, canUndo: true, canRedo: false },
+        };
+      });
       transformQueueRef.current = transformQueueRef.current
         .then(async () => {
           const document = await transformLayer(layerId, transform);
@@ -317,11 +345,12 @@ export function WorkspaceShell({
   useEffect(() => {
     if (workspace.workspaceMode !== "preview") return;
     let cancelled = false;
-    setBoardPreview(null);
     setBoardPreviewError(null);
     void getBoardPreview()
       .then((preview) => {
-        if (!cancelled) setBoardPreview(preview);
+        if (!cancelled) {
+          startTransition(() => setBoardPreview(preview));
+        }
       })
       .catch((error: unknown) => {
         if (!cancelled) setBoardPreviewError(errorMessage(error));
@@ -335,17 +364,20 @@ export function WorkspaceShell({
     if (workspace.workspaceMode !== "edit") return;
     const request = productionPreviewRequestRef.current + 1;
     productionPreviewRequestRef.current = request;
-    void getProductionPreview()
-      .then((preview) => {
-        if (productionPreviewRequestRef.current === request) {
-          setProductionPreview(preview);
-        }
-      })
-      .catch((error: unknown) => {
-        if (productionPreviewRequestRef.current === request) {
-          setStatus(`生产层预览失败：${errorMessage(error)}`);
-        }
-      });
+    const timeout = window.setTimeout(() => {
+      void getProductionPreview()
+        .then((preview) => {
+          if (productionPreviewRequestRef.current === request) {
+            startTransition(() => setProductionPreview(preview));
+          }
+        })
+        .catch((error: unknown) => {
+          if (productionPreviewRequestRef.current === request) {
+            setStatus(`生产层预览失败：${errorMessage(error)}`);
+          }
+        });
+    }, 250);
+    return () => window.clearTimeout(timeout);
   }, [sessionDocument, workspace.workspaceMode]);
 
   useEffect(() => {
@@ -368,6 +400,19 @@ export function WorkspaceShell({
         }));
         setStatus("已进入组合，再次点击可选择组内对象");
       }
+      if (
+        event.key === "Escape" &&
+        drillGroupIds[workspace.activeFace] !== null
+      ) {
+        event.preventDefault();
+        const groupId = drillGroupIds[workspace.activeFace];
+        setDrillGroupIds((current) => ({
+          ...current,
+          [workspace.activeFace]: null,
+        }));
+        if (groupId) selectOnly(workspace.activeFace, groupId);
+        setStatus("已退出组合");
+      }
       const direction = {
         ArrowLeft: "left",
         ArrowRight: "right",
@@ -378,7 +423,6 @@ export function WorkspaceShell({
         direction &&
         selectedLayer &&
         selectedIds.length === 1 &&
-        selectedLayer.kind.type !== "group" &&
         selectedLayer.kind.type !== "boardFill" &&
         !event.altKey &&
         !event.ctrlKey &&
@@ -409,6 +453,8 @@ export function WorkspaceShell({
     applyDocumentMutation,
     applyLayerTransform,
     currentLayers,
+    drillGroupIds,
+    selectOnly,
     selectedIds.length,
     selectedLayer,
     workspace.activeFace,
@@ -534,20 +580,42 @@ export function WorkspaceShell({
               value={workspace.workspaceMode}
             />
             {workspace.workspaceMode === "edit" && (
-              <SegmentedControl
-                ariaLabel="画板布局"
-                items={[
-                  { id: "both", label: "同时查看", icon: Columns2 },
-                  { id: "focus", label: "聚焦当前面", icon: PanelTop },
-                ]}
-                onChange={(editLayout) =>
-                  dispatch({
-                    type: "setEditLayout",
-                    editLayout: editLayout as "both" | "focus",
-                  })
-                }
-                value={workspace.editLayout}
-              />
+              <>
+                <SegmentedControl
+                  ariaLabel="画板布局"
+                  items={[
+                    { id: "both", label: "同时查看", icon: Columns2 },
+                    { id: "focus", label: "聚焦当前面", icon: PanelTop },
+                  ]}
+                  onChange={(editLayout) =>
+                    dispatch({
+                      type: "setEditLayout",
+                      editLayout: editLayout as "both" | "focus",
+                    })
+                  }
+                  value={workspace.editLayout}
+                />
+                {workspace.editLayout === "both" && (
+                  <SegmentedControl
+                    ariaLabel="画板排列"
+                    items={[
+                      { id: "auto", label: "自动" },
+                      { id: "horizontal", label: "左右" },
+                      { id: "vertical", label: "上下" },
+                    ]}
+                    onChange={(boardArrangement) =>
+                      dispatch({
+                        type: "setBoardArrangement",
+                        boardArrangement: boardArrangement as
+                          | "auto"
+                          | "horizontal"
+                          | "vertical",
+                      })
+                    }
+                    value={workspace.boardArrangement}
+                  />
+                )}
+              </>
             )}
           </div>
 
@@ -659,6 +727,12 @@ export function WorkspaceShell({
                     "生产层关联已移除",
                   )
                 }
+                onRename={(layer, name) =>
+                  void applyDocumentMutation(
+                    () => setLayerName(layer.id, name),
+                    `图层已重命名为“${name}”`,
+                  )
+                }
                 onSelectBoard={() => dispatch({ type: "selectBoard" })}
                 onSelectContext={(face, workContext) =>
                   dispatch({
@@ -699,7 +773,7 @@ export function WorkspaceShell({
             <div className="border-t p-2">
               <div className="grid grid-cols-2 gap-1">
                 <Button
-                  disabled={selectedIds.length < 1}
+                  disabled={selectedIds.length < 2}
                   onClick={() =>
                     void (async () => {
                       try {
@@ -742,10 +816,18 @@ export function WorkspaceShell({
           <section
             className={cn(
               "grid min-h-0 min-w-0 gap-3 overflow-auto bg-workspace p-3",
-              workspace.editLayout === "both"
-                ? "grid-cols-[repeat(auto-fit,minmax(min(420px,100%),1fr))]"
-                : "grid-cols-1",
+              workspace.editLayout === "focus" && "grid-cols-1",
+              workspace.editLayout === "both" &&
+                workspace.boardArrangement === "auto" &&
+                "grid-cols-[repeat(auto-fit,minmax(min(420px,100%),1fr))]",
+              workspace.editLayout === "both" &&
+                workspace.boardArrangement === "horizontal" &&
+                "grid-cols-[repeat(2,minmax(400px,1fr))]",
+              workspace.editLayout === "both" &&
+                workspace.boardArrangement === "vertical" &&
+                "grid-cols-1",
             )}
+            data-arrangement={workspace.boardArrangement}
             data-layout={workspace.editLayout}
             data-testid="edit-board-layout"
           >
@@ -771,6 +853,7 @@ export function WorkspaceShell({
                   <div className="min-h-[320px] min-w-0" key={face}>
                     <WorkspaceCanvas
                       active={workspace.activeFace === face}
+                      activeGroupId={drillGroupIds[face]}
                       document={sessionDocument}
                       editingLayer={faceEditingLayer}
                       face={face}
@@ -784,6 +867,18 @@ export function WorkspaceShell({
                       onBeginTextEdit={(layerId) => {
                         dispatch({ type: "setFace", face });
                         setEditingLayerId(layerId);
+                      }}
+                      onEnterGroup={(layerId) => {
+                        dispatch({
+                          type: "setSelection",
+                          face,
+                          layerIds: [layerId],
+                        });
+                        setDrillGroupIds((current) => ({
+                          ...current,
+                          [face]: layerId,
+                        }));
+                        setStatus("已进入组合，Esc 返回上一级");
                       }}
                       onCommitText={(layerId, text) =>
                         void handleCommitText(layerId, text)
@@ -872,6 +967,7 @@ export function WorkspaceShell({
             ) : selectedLayer ? (
               <SelectedLayerInspector
                 face={workspace.activeFace}
+                fontFamilies={fontFamilies}
                 layer={selectedLayer}
                 layers={currentLayers}
                 mappings={sessionDocument.mappings}
@@ -912,6 +1008,17 @@ export function WorkspaceShell({
                       setStatus(`关联失败：${errorMessage(error)}`);
                     }
                   })()
+                }
+                onSetTextStyle={(fontFamily, fontSizeUm) =>
+                  void applyDocumentMutation(
+                    () =>
+                      setTextStyle(
+                        selectedLayer.id,
+                        fontFamily,
+                        fontSizeUm,
+                      ),
+                    "文字样式已更新",
+                  )
                 }
                 onReplaceImage={() => {
                   setReplaceLayerId(selectedLayer.id);
@@ -1226,6 +1333,7 @@ function BoardNumberInput({
 
 function SelectedLayerInspector({
   face,
+  fontFamilies,
   layer,
   layers,
   mappings,
@@ -1234,9 +1342,11 @@ function SelectedLayerInspector({
   onReplaceImage,
   onSetExportEnabled,
   onSetMapping,
+  onSetTextStyle,
   onTransform,
 }: {
   face: CardFace;
+  fontFamilies: string[];
   layer: ContentLayer;
   layers: ContentLayer[];
   mappings: WorkspaceDocument["mappings"];
@@ -1249,9 +1359,14 @@ function SelectedLayerInspector({
     enabled: boolean,
     combine: "add" | "subtract",
   ) => void;
+  onSetTextStyle: (fontFamily: string, fontSizeUm: number) => void;
   onTransform: (transform: ContentLayer["transform"]) => void;
 }) {
-  const hasGeometry = layer.kind.type === "image" || layer.kind.type === "text";
+  const hasGeometry =
+    layer.kind.type === "image" ||
+    layer.kind.type === "text" ||
+    layer.kind.type === "group";
+  const textKind = layer.kind.type === "text" ? layer.kind : null;
   const editable = hasGeometry && isLayerTransformEditable(layer, layers);
   const commitPatch = (patch: TransformPatch) => {
     try {
@@ -1339,11 +1454,54 @@ function SelectedLayerInspector({
           替换图片
         </Button>
       )}
-      {layer.kind.type === "text" && (
-        <Button className="mt-2 w-full" onClick={onEditText} variant="ghost">
-          <Type className="size-3.5" />
-          编辑文字
-        </Button>
+      {textKind && (
+        <div className="space-y-2 pt-2">
+          <label className="block space-y-1 text-[10px] text-muted-foreground">
+            <span>字体</span>
+            <select
+              aria-label="字体"
+              className="h-8 w-full rounded-md border bg-background px-2 text-[11px] text-foreground disabled:cursor-not-allowed disabled:opacity-55"
+              disabled={!editable}
+              onChange={(event) =>
+                onSetTextStyle(
+                  event.currentTarget.value,
+                  textKind.fontSizeUm,
+                )
+              }
+              style={{ fontFamily: textKind.fontFamily }}
+              value={textKind.fontFamily}
+            >
+              {!fontFamilies.includes(textKind.fontFamily) && (
+                <option value={textKind.fontFamily}>
+                  {textKind.fontFamily}（本机缺失，将回退）
+                </option>
+              )}
+              {fontFamilies.map((family) => (
+                <option key={family} value={family}>
+                  {family === "sans-serif" ? "内置 Noto Sans SC" : family}
+                </option>
+              ))}
+            </select>
+          </label>
+          <TransformInput
+            disabled={!editable}
+            field="size"
+            label="字号"
+            onCommit={(fontSizeUm) =>
+              onSetTextStyle(textKind.fontFamily, fontSizeUm)
+            }
+            onError={onError}
+            unit="mm"
+            value={textKind.fontSizeUm}
+          />
+          <Button className="w-full" onClick={onEditText} variant="ghost">
+            <Type className="size-3.5" />
+            编辑文字
+          </Button>
+          <p className="text-[10px] leading-4 text-muted-foreground">
+            本机字体用于当前工程；换电脑缺失时回退为内置字体。
+          </p>
+        </div>
       )}
       {layer.kind.type === "boardFill" && (
         <InspectorRow
@@ -1360,6 +1518,7 @@ function SelectedLayerInspector({
           type="checkbox"
         />
       </label>
+      {layer.kind.type !== "group" && (
       <div className="space-y-1 pt-1">
         <p className="text-[10px] font-medium text-muted-foreground">
           关联到生产层
@@ -1420,6 +1579,7 @@ function SelectedLayerInspector({
           );
         })}
       </div>
+      )}
     </InspectorSection>
   );
 }

@@ -132,6 +132,10 @@ Web 与 Tauri MUST 调用同一版本的 Workspace 能力契约和 Rust 领域�
 - **WHEN** 用户在 Web 插入图片、分组对象并进入预览
 - **THEN** Web 必须从当前工程编译 `ResolvedFabricationBoard`，3D 纹理必须反映刚才的编辑且与 Tauri 对同一工程的哈希一致
 
+#### Scenario: Web 与 Tauri 使用相同紧凑预览契约
+- **WHEN** Web bridge 或 Tauri 请求生产层检查及 3D 成板纹理
+- **THEN** 两端必须接收相同字段和 PNG 纹理契约，不得由任一端回退为硬编码纹理或完整 RGBA JSON 数组
+
 ### Requirement: 撤销和重做
 系统 MUST 对本轮支持的内容插入、删除、变换、排序、分组、锁定、显隐和生产映射操作
 提供撤销与重做。

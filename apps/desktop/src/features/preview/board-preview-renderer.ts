@@ -18,15 +18,14 @@ export type BoardPreviewOutline =
 /**
  * TypeScript projection of atelier-core's `PreviewTexture`.
  *
- * The byte buffer is deliberately explicit: a renderer may only display
- * pixels compiled by Core, never infer manufacturing output from editor
- * objects.
+ * The encoded texture is produced by Core. Renderers may only display these
+ * pixels and never infer manufacturing output from editor objects.
  */
 export interface BoardPreviewTexture {
   side: PreviewCardSide;
   widthPx: number;
   heightPx: number;
-  rgba: number[];
+  pngDataUrl: string;
 }
 
 /**
@@ -38,7 +37,12 @@ export interface BoardPreviewTexture {
 export interface BoardPreviewInput {
   outline: BoardPreviewOutline;
   thicknessUm: number;
+  fabricationInputSha256: string;
+  fabricationOutputSha256: string;
   textures: {
+    palette: {
+      solderMask: { r: number; g: number; b: number; a: number };
+    };
     front: BoardPreviewTexture;
     back: BoardPreviewTexture;
   };
@@ -87,6 +91,12 @@ export function validateBoardPreviewInput(
   if (geometry.thicknessMm <= 0) {
     errors.push("board thickness must be positive");
   }
+  if (!/^[a-f0-9]{64}$/i.test(preview.fabricationInputSha256)) {
+    errors.push("fabrication input hash must be a SHA-256 digest");
+  }
+  if (!/^[a-f0-9]{64}$/i.test(preview.fabricationOutputSha256)) {
+    errors.push("fabrication output hash must be a SHA-256 digest");
+  }
   if (
     geometry.cornerRadiusMm < 0 ||
     geometry.cornerRadiusMm >
@@ -119,10 +129,7 @@ function validateTexture(
     errors.push(`${expectedSide} texture dimensions must be positive integers`);
     return;
   }
-  const expectedBytes = texture.widthPx * texture.heightPx * 4;
-  if (texture.rgba.length !== expectedBytes) {
-    errors.push(
-      `${expectedSide} texture has ${texture.rgba.length} RGBA bytes; expected ${expectedBytes}`,
-    );
+  if (!texture.pngDataUrl.startsWith("data:image/png;base64,")) {
+    errors.push(`${expectedSide} texture must be a PNG data URL`);
   }
 }

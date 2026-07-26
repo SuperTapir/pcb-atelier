@@ -657,9 +657,9 @@ const BenchmarkBoard = memo(function BenchmarkBoard({
             image={productionTextures[textureIndex]}
             key={textureIndex}
             opacity={0.44}
-            scaleX={face === "front" ? 1 : -1}
+            scaleX={1}
             width={BOARD.width}
-            x={face === "front" ? 0 : BOARD.width}
+            x={0}
           />
         ))}
       </Layer>

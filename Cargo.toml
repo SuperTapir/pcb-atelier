@@ -12,11 +12,13 @@ license = "MIT"
 rust-version = "1.85"
 
 [workspace.dependencies]
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 aes-gcm = "0.10"
 flate2 = "1"
 fontdue = "0.9"
+fontdb = "0.23"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }

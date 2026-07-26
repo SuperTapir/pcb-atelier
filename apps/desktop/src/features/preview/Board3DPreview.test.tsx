@@ -26,9 +26,7 @@ describe("Board3DPreview", () => {
 });
 
 function previewInput(): BoardPreviewInput {
-  const rgba = [
-    35, 67, 135, 255, 35, 67, 135, 255, 35, 67, 135, 255, 35, 67, 135, 255,
-  ];
+  const pngDataUrl = "data:image/png;base64,fixture";
   return {
     outline: {
       type: "roundedRectangle",
@@ -37,9 +35,12 @@ function previewInput(): BoardPreviewInput {
       cornerRadiusUm: 2_000,
     },
     thicknessUm: 1_600,
+    fabricationInputSha256: "a".repeat(64),
+    fabricationOutputSha256: "b".repeat(64),
     textures: {
-      front: { side: "front", widthPx: 2, heightPx: 2, rgba },
-      back: { side: "back", widthPx: 2, heightPx: 2, rgba },
+      palette: { solderMask: { r: 35, g: 67, b: 135, a: 255 } },
+      front: { side: "front", widthPx: 2, heightPx: 2, pngDataUrl },
+      back: { side: "back", widthPx: 2, heightPx: 2, pngDataUrl },
     },
   };
 }

@@ -10,7 +10,7 @@ export interface ProductionLayerTexture {
   layer: ProductionLayer;
   widthPx: number;
   heightPx: number;
-  rgba: number[];
+  pngDataUrl: string;
 }
 
 export interface ProductionPreviewInput {
@@ -114,9 +114,9 @@ export function validateProductionPreview(
       !Number.isInteger(texture.heightPx) ||
       texture.widthPx <= 0 ||
       texture.heightPx <= 0 ||
-      texture.rgba.length !== texture.widthPx * texture.heightPx * 4
+      !texture.pngDataUrl.startsWith("data:image/png;base64,")
     ) {
-      errors.push(`${side}.${layer} has invalid RGBA dimensions`);
+      errors.push(`${side}.${layer} has invalid PNG texture`);
     }
     if (
       texture.widthPx !== expectedWidthPx ||
@@ -162,7 +162,7 @@ export function buildProductionRenderLayers(
   const viewTransform = productionLayerViewTransform(
     preview,
     selection.side,
-    selection.mirroredForViewing ?? selection.side === "back",
+    selection.mirroredForViewing ?? false,
   );
 
   return visibleLayers.map((layer) => ({

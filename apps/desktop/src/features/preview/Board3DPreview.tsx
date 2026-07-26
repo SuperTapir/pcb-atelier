@@ -1,17 +1,16 @@
 import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  DataTexture,
   DoubleSide,
   ExtrudeGeometry,
   LinearFilter,
   MeshStandardMaterial,
-  RGBAFormat,
   Shape,
   ShapeGeometry,
   SRGBColorSpace,
-  UnsignedByteType,
+  Texture,
+  TextureLoader,
 } from "three";
 
 import {
@@ -39,6 +38,12 @@ export function Board3DPreview({
     <div
       aria-label="3D 成板效果预览"
       className={className}
+      data-fabrication-output-sha={preview.fabricationOutputSha256}
+      data-solder-mask-rgb={[
+        preview.textures.palette.solderMask.r,
+        preview.textures.palette.solderMask.g,
+        preview.textures.palette.solderMask.b,
+      ].join(",")}
       data-testid="board-3d-preview"
       role="img"
       style={{
@@ -240,25 +245,34 @@ function BoardMesh({ preview }: { preview: BoardPreviewInput }) {
 }
 
 function useBoardTexture(texture: BoardPreviewTexture) {
-  const dataTexture = useMemo(() => {
-    const result = new DataTexture(
-      Uint8Array.from(texture.rgba),
-      texture.widthPx,
-      texture.heightPx,
-      RGBAFormat,
-      UnsignedByteType,
-    );
-    result.colorSpace = SRGBColorSpace;
-    result.flipY = true;
-    result.magFilter = LinearFilter;
-    result.minFilter = LinearFilter;
-    result.generateMipmaps = false;
-    result.needsUpdate = true;
-    return result;
-  }, [texture.heightPx, texture.rgba, texture.widthPx]);
+  const [loadedTexture, setLoadedTexture] = useState<Texture | null>(null);
 
-  useEffect(() => () => dataTexture.dispose(), [dataTexture]);
-  return dataTexture;
+  useEffect(() => {
+    let active = true;
+    const nextTexture = new TextureLoader().load(
+      texture.pngDataUrl,
+      (result) => {
+        if (!active) {
+          result.dispose();
+          return;
+        }
+        result.colorSpace = SRGBColorSpace;
+        result.flipY = true;
+        result.magFilter = LinearFilter;
+        result.minFilter = LinearFilter;
+        result.generateMipmaps = false;
+        result.needsUpdate = true;
+        setLoadedTexture(result);
+      },
+    );
+    return () => {
+      active = false;
+      nextTexture.dispose();
+      setLoadedTexture(null);
+    };
+  }, [texture.pngDataUrl]);
+
+  return loadedTexture;
 }
 
 function roundedRectangleShape(

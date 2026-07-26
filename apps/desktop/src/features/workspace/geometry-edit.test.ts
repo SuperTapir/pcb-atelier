@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyGroupTransform,
   GeometryEditError,
   applyTransformPatch,
   axisAlignedBounds,
@@ -298,5 +299,72 @@ describe("snapTransform", () => {
         altKey: true,
       }),
     ).toThrowError(GeometryEditError);
+  });
+
+  it("previews a group transform by updating every descendant atomically", () => {
+    const group = layer(
+      "group",
+      {
+        ...BASE_TRANSFORM,
+        xUm: 1_000,
+        yUm: 2_000,
+        widthUm: 29_000,
+        heightUm: 5_000,
+      },
+    );
+    const first = layer(
+      "first",
+      {
+        ...BASE_TRANSFORM,
+        xUm: 1_000,
+        yUm: 2_000,
+        widthUm: 10_000,
+        heightUm: 5_000,
+      },
+      { parentId: "group" },
+    );
+    const second = layer(
+      "second",
+      {
+        ...BASE_TRANSFORM,
+        xUm: 20_000,
+        yUm: 2_000,
+        widthUm: 10_000,
+        heightUm: 5_000,
+      },
+      { parentId: "group" },
+    );
+
+    const result = applyGroupTransform([group, first, second], "group", {
+      ...group.transform,
+      xUm: 6_000,
+      yUm: 7_000,
+      widthUm: 58_000,
+      heightUm: 10_000,
+    });
+
+    expect(result.map(({ transform }) => transform)).toEqual([
+      {
+        ...group.transform,
+        xUm: 6_000,
+        yUm: 7_000,
+        widthUm: 58_000,
+        heightUm: 10_000,
+      },
+      {
+        ...first.transform,
+        xUm: 6_000,
+        yUm: 7_000,
+        widthUm: 20_000,
+        heightUm: 10_000,
+      },
+      {
+        ...second.transform,
+        xUm: 44_000,
+        yUm: 7_000,
+        widthUm: 20_000,
+        heightUm: 10_000,
+      },
+    ]);
   });
 });

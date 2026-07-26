@@ -26,12 +26,12 @@ function fixture(): ProductionPreviewInput {
     fabricationOutputSha256: "b".repeat(64),
     pixelPitchUm: 100,
     textures: (["front", "back"] as const).flatMap((side) =>
-      layers.map((layer, index) => ({
+      layers.map((layer) => ({
         side,
         layer,
         widthPx: 2,
         heightPx: 1,
-        rgba: [index, 0, 0, 255, 0, 0, 0, 0],
+        pngDataUrl: `data:image/png;base64,${side}.${layer}`,
       })),
     ),
   };
@@ -48,7 +48,6 @@ describe("ProductionRenderer input", () => {
 
     const wrongGrid = fixture();
     wrongGrid.textures[0].widthPx = 3;
-    wrongGrid.textures[0].rgba.push(0, 0, 0, 0);
     expect(validateProductionPreview(wrongGrid)).toContain(
       "front.copper dimensions do not match the compiled production grid",
     );
@@ -78,7 +77,9 @@ describe("ProductionRenderer input", () => {
       "solderMaskOpen",
     );
     expect(texture?.side).toBe("back");
-    expect(texture?.rgba).toEqual([1, 0, 0, 255, 0, 0, 0, 0]);
+    expect(texture?.pngDataUrl).toBe(
+      "data:image/png;base64,back.solderMaskOpen",
+    );
   });
 
   it("derives visibility and isolation without mutating compiled textures", () => {
@@ -132,6 +133,17 @@ describe("ProductionRenderer input", () => {
     expect(selectProductionTexture(preview, "back", "copper")).toEqual(
       originalBack,
     );
+  });
+
+  it("keeps the back production stack upright unless physical viewing is explicit", () => {
+    const renderLayers = buildProductionRenderLayers(fixture(), {
+      side: "back",
+    });
+
+    expect(renderLayers[0].viewTransform).toEqual({
+      scaleX: 1,
+      xUm: 0,
+    });
   });
 
   it("exposes the Konva texture implementation through the replaceable renderer contract", () => {

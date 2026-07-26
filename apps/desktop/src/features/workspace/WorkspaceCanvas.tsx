@@ -63,8 +63,10 @@ interface WorkspaceCanvasProps {
   workContext: WorkContext;
   viewport: CanvasViewport;
   active: boolean;
+  activeGroupId: string | null;
   onActivate: () => void;
   onBeginTextEdit: (layerId: string) => void;
+  onEnterGroup: (layerId: string) => void;
   onCommitText: (layerId: string, text: string) => void;
   onCreateText: (draft: TextDraft) => void;
   onSelect: (
@@ -104,8 +106,10 @@ export function WorkspaceCanvas({
   workContext,
   viewport,
   active,
+  activeGroupId,
   onActivate,
   onBeginTextEdit,
+  onEnterGroup,
   onCommitText,
   onCreateText,
   onSelect,
@@ -186,9 +190,7 @@ export function WorkspaceCanvas({
     const direction = event.evt.deltaY > 0 ? 1 / 1.12 : 1.12;
     const zoom = clamp(viewport.zoom * direction, MIN_ZOOM, MAX_ZOOM);
     const scale = PIXELS_PER_MM * zoom;
-    const displayedX =
-      face === "front" ? boardPoint.x : boardWidthMm - boardPoint.x;
-    const nextOriginX = pointer.x - displayedX * scale;
+    const nextOriginX = pointer.x - boardPoint.x * scale;
     const nextOriginY = pointer.y - boardPoint.y * scale;
     onViewportChange({
       zoom,
@@ -229,6 +231,7 @@ export function WorkspaceCanvas({
         active ? "border-primary/70 ring-2 ring-primary/15" : "border-border/70"
       }`}
       data-active={active}
+      data-edit-orientation="upright"
       data-face={face}
       data-testid={`workspace-canvas-${face}`}
       onMouseDownCapture={(event) => {
@@ -282,13 +285,9 @@ export function WorkspaceCanvas({
           </Layer>
           <Layer listening={false}>
             <Group
-              scaleX={face === "front" ? transform.scale : -transform.scale}
+              scaleX={transform.scale}
               scaleY={transform.scale}
-              x={
-                face === "front"
-                  ? transform.originX
-                  : transform.originX + boardWidthMm * transform.scale
-              }
+              x={transform.originX}
               y={transform.originY}
             >
               <Rect
@@ -363,17 +362,18 @@ export function WorkspaceCanvas({
               y={transform.originY}
             />
             <Group
-              scaleX={face === "front" ? transform.scale : -transform.scale}
+              scaleX={transform.scale}
               scaleY={transform.scale}
-              x={
-                face === "front"
-                  ? transform.originX
-                  : transform.originX + boardWidthMm * transform.scale
-              }
+              x={transform.originX}
               y={transform.originY}
             >
               {layers
-                .filter((layer) => layer.visible)
+                .filter((layer) => isEffectivelyVisible(layer, layers))
+                .sort(
+                  (left, right) =>
+                    Number(left.kind.type === "group") -
+                    Number(right.kind.type === "group"),
+                )
                 .map((layer) => (
                   <ContentNode
                     image={
@@ -387,6 +387,7 @@ export function WorkspaceCanvas({
                     boardHeightUm={document.board.heightUm}
                     boardWidthUm={document.board.widthUm}
                     onBeginTextEdit={onBeginTextEdit}
+                    onEnterGroup={onEnterGroup}
                     onSelect={onSelect}
                     onSnapGuidesChange={setSnapGuides}
                     onTransformLayer={onTransformLayer}
@@ -399,6 +400,10 @@ export function WorkspaceCanvas({
                     locked={
                       layer.kind.type === "boardFill" ||
                       !isLayerTransformEditable(layer, layers)
+                    }
+                    listening={
+                      layer.kind.type !== "group" ||
+                      layer.id !== activeGroupId
                     }
                   />
                 ))}
@@ -436,8 +441,6 @@ export function WorkspaceCanvas({
 
       {editingLayer?.kind.type === "text" && (
         <TextEditorOverlay
-          boardWidthMm={boardWidthMm}
-          face={face}
           key={editingLayer.id}
           layer={editingLayer}
           onCommit={onCommitText}
@@ -489,6 +492,7 @@ function ContentNode({
   boardHeightUm,
   boardWidthUm,
   onBeginTextEdit,
+  onEnterGroup,
   onSelect,
   onSnapGuidesChange,
   onTransformLayer,
@@ -496,10 +500,12 @@ function ContentNode({
   snapThresholdUm,
   strokeWidth,
   locked,
+  listening,
 }: {
   image?: HTMLImageElement;
   layer: ContentLayer;
   onBeginTextEdit: (layerId: string) => void;
+  onEnterGroup: (layerId: string) => void;
   onSelect: WorkspaceCanvasProps["onSelect"];
   onSnapGuidesChange: (guides: SnapGuide[]) => void;
   onTransformLayer: WorkspaceCanvasProps["onTransformLayer"];
@@ -507,6 +513,7 @@ function ContentNode({
   snapThresholdUm: number;
   strokeWidth: number;
   locked: boolean;
+  listening: boolean;
   layers: ContentLayer[];
   boardWidthUm: number;
   boardHeightUm: number;
@@ -571,7 +578,7 @@ function ContentNode({
       <Group
         draggable={selected && !locked}
         id={layer.id}
-        listening={!locked}
+        listening={!locked && listening}
         name="content-node"
         ref={nodeRef}
         onClick={(event) => {
@@ -596,7 +603,11 @@ function ContentNode({
         }}
         onDblClick={(event) => {
           event.cancelBubble = true;
-          if (layer.kind.type === "text") onBeginTextEdit(layer.id);
+          if (layer.kind.type === "text") {
+            onBeginTextEdit(layer.id);
+          } else if (layer.kind.type === "group") {
+            onEnterGroup(layer.id);
+          }
         }}
         offsetX={width / 2}
         offsetY={height / 2}
@@ -610,6 +621,13 @@ function ContentNode({
         onDragEnd={commitNodeTransform}
         onTransformEnd={commitNodeTransform}
       >
+        {layer.kind.type === "group" && (
+          <Rect
+            fill="rgba(0,0,0,0.001)"
+            height={height}
+            width={width}
+          />
+        )}
         {layer.kind.type === "image" &&
           (image ? (
             <KonvaImage height={height} image={image} width={width} />
@@ -670,15 +688,22 @@ function isEffectivelyLocked(layer: ContentLayer, layers: ContentLayer[]) {
   return false;
 }
 
+function isEffectivelyVisible(layer: ContentLayer, layers: ContentLayer[]) {
+  if (!layer.visible) return false;
+  let parentId = layer.parentId;
+  while (parentId) {
+    const parent = layers.find((candidate) => candidate.id === parentId);
+    if (!parent || !parent.visible) return false;
+    parentId = parent.parentId;
+  }
+  return true;
+}
+
 function TextEditorOverlay({
-  boardWidthMm,
-  face,
   layer,
   onCommit,
   transform,
 }: {
-  boardWidthMm: number;
-  face: CardFace;
   layer: ContentLayer;
   onCommit: (layerId: string, text: string) => void;
   transform: ReturnType<typeof getBoardTransform>;
@@ -692,11 +717,7 @@ function TextEditorOverlay({
     onCommit(layer.id, value);
   };
   const layerX = layer.transform.xUm / 1_000;
-  const layerWidth = layer.transform.widthUm / 1_000;
-  const left =
-    transform.originX +
-    (face === "front" ? layerX : boardWidthMm - layerX - layerWidth) *
-      transform.scale;
+  const left = transform.originX + layerX * transform.scale;
   const top =
     transform.originY + (layer.transform.yUm / 1_000) * transform.scale;
   const width = Math.max(
@@ -736,9 +757,7 @@ function TextEditorOverlay({
           (layer.kind.fontSizeUm / 1_000) * transform.scale,
         ),
         lineHeight: 1.2,
-        transform: `rotate(${
-          (face === "front" ? 1 : -1) * (layer.transform.rotationMdeg / 1_000)
-        }deg)`,
+        transform: `rotate(${layer.transform.rotationMdeg / 1_000}deg)`,
         transformOrigin: "top left",
       }}
       value={value}
@@ -819,10 +838,10 @@ function screenToBoard(
 
 export function displayedXToBoardX(
   displayedX: number,
-  face: CardFace,
-  boardWidthMm: number,
+  _face: CardFace,
+  _boardWidthMm: number,
 ) {
-  return face === "front" ? displayedX : boardWidthMm - displayedX;
+  return displayedX;
 }
 
 function isInsideBoard(point: Point, widthMm: number, heightMm: number) {

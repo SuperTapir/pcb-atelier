@@ -114,8 +114,7 @@ impl DocumentCommand {
                 transform,
             } => {
                 ensure_layer_unlocked(document, layer_id)?;
-                let layer = layer_mut(document, layer_id)?;
-                layer.transform = transform;
+                transform_layer(document, layer_id, transform)?;
             }
             Self::SetLayerLock { layer_id, locked } => {
                 layer_mut(document, layer_id)?.locked = locked;
@@ -325,6 +324,8 @@ pub enum CommandError {
     InvalidLayerIndex(usize),
     #[error("group command requires at least one content layer")]
     EmptyGroup,
+    #[error("group command requires at least two content layers")]
+    InsufficientGroupMembers,
     #[error("group layer {0} is not a group")]
     NotAGroup(LayerId),
     #[error("grouping selection contains duplicate layer id: {0}")]
@@ -491,8 +492,12 @@ fn group_layers(
     group: ContentLayer,
     layer_ids: Vec<LayerId>,
 ) -> Result<(), CommandError> {
-    if layer_ids.is_empty() {
-        return Err(CommandError::EmptyGroup);
+    if layer_ids.len() < 2 {
+        return Err(if layer_ids.is_empty() {
+            CommandError::EmptyGroup
+        } else {
+            CommandError::InsufficientGroupMembers
+        });
     }
     if !matches!(group.kind, ContentKind::Group) {
         return Err(CommandError::NotAGroup(group.id));
@@ -514,6 +519,15 @@ fn group_layers(
         ensure_unlocked(&face(document, side).layers[index])?;
     }
 
+    let group_transform = bounds_for_layers(
+        layer_ids
+            .iter()
+            .map(|layer_id| layer(document, *layer_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter(),
+    );
+    let mut group = group;
+    group.transform = group_transform;
     let selected_face = face_mut(document, side);
     let insert_index = selected_face
         .layers
@@ -534,6 +548,190 @@ fn group_layers(
     remaining.splice(insert_index + 1..insert_index + 1, selected);
     selected_face.layers = remaining;
     Ok(())
+}
+
+fn transform_layer(
+    document: &mut AtelierDocument,
+    layer_id: LayerId,
+    transform: TransformUm,
+) -> Result<(), CommandError> {
+    let (side, index) =
+        locate_layer(document, layer_id).ok_or(CommandError::LayerNotFound(layer_id))?;
+    if !matches!(face(document, side).layers[index].kind, ContentKind::Group) {
+        face_mut(document, side).layers[index].transform = transform;
+        return Ok(());
+    }
+
+    let group_id = face(document, side).layers[index].id;
+    let descendant_ids = descendant_ids(face(document, side), group_id);
+    for descendant_id in &descendant_ids {
+        ensure_unlocked(layer(document, *descendant_id)?)?;
+    }
+    let old_group = {
+        let group = &face(document, side).layers[index];
+        if group.transform.width_um == 0 || group.transform.height_um == 0 {
+            bounds_for_layers(
+                face(document, side)
+                    .layers
+                    .iter()
+                    .filter(|candidate| descendant_ids.contains(&candidate.id)),
+            )
+        } else {
+            group.transform
+        }
+    };
+    let original = face(document, side)
+        .layers
+        .iter()
+        .filter(|candidate| descendant_ids.contains(&candidate.id))
+        .map(|candidate| (candidate.id, candidate.transform))
+        .collect::<Vec<_>>();
+
+    for (descendant_id, descendant_transform) in original {
+        let next = transform_relative_to_group(descendant_transform, old_group, transform);
+        let descendant_index = face(document, side)
+            .layers
+            .iter()
+            .position(|candidate| candidate.id == descendant_id)
+            .expect("collected descendant must still exist");
+        face_mut(document, side).layers[descendant_index].transform = next;
+    }
+    face_mut(document, side).layers[index].transform = transform;
+    Ok(())
+}
+
+fn descendant_ids(face: &CardFace, group_id: LayerId) -> HashSet<LayerId> {
+    let mut descendants = HashSet::new();
+    loop {
+        let before = descendants.len();
+        for candidate in &face.layers {
+            if candidate
+                .parent_id
+                .is_some_and(|parent_id| parent_id == group_id || descendants.contains(&parent_id))
+            {
+                descendants.insert(candidate.id);
+            }
+        }
+        if descendants.len() == before {
+            return descendants;
+        }
+    }
+}
+
+fn bounds_for_layers<'a>(layers: impl Iterator<Item = &'a ContentLayer>) -> TransformUm {
+    let mut min_x = i64::MAX;
+    let mut min_y = i64::MAX;
+    let mut max_x = i64::MIN;
+    let mut max_y = i64::MIN;
+    for layer in layers {
+        let (layer_min_x, layer_min_y, layer_max_x, layer_max_y) =
+            axis_aligned_bounds(layer.transform);
+        min_x = min_x.min(layer_min_x);
+        min_y = min_y.min(layer_min_y);
+        max_x = max_x.max(layer_max_x);
+        max_y = max_y.max(layer_max_y);
+    }
+    if min_x == i64::MAX {
+        return TransformUm::default();
+    }
+    TransformUm::rect(
+        min_x,
+        min_y,
+        u32::try_from((max_x - min_x).max(1)).unwrap_or(u32::MAX),
+        u32::try_from((max_y - min_y).max(1)).unwrap_or(u32::MAX),
+    )
+}
+
+fn axis_aligned_bounds(transform: TransformUm) -> (i64, i64, i64, i64) {
+    let center_x = transform.x_um as f64 + f64::from(transform.width_um) / 2.0;
+    let center_y = transform.y_um as f64 + f64::from(transform.height_um) / 2.0;
+    let half_width = f64::from(transform.width_um) / 2.0;
+    let half_height = f64::from(transform.height_um) / 2.0;
+    let radians = (f64::from(transform.rotation_mdeg) / 1_000.0).to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (x, y) in [
+        (-half_width, -half_height),
+        (half_width, -half_height),
+        (half_width, half_height),
+        (-half_width, half_height),
+    ] {
+        let board_x = center_x + x * cos - y * sin;
+        let board_y = center_y + x * sin + y * cos;
+        min_x = min_x.min(board_x);
+        min_y = min_y.min(board_y);
+        max_x = max_x.max(board_x);
+        max_y = max_y.max(board_y);
+    }
+    (
+        min_x.floor() as i64,
+        min_y.floor() as i64,
+        max_x.ceil() as i64,
+        max_y.ceil() as i64,
+    )
+}
+
+fn transform_relative_to_group(
+    child: TransformUm,
+    old_group: TransformUm,
+    new_group: TransformUm,
+) -> TransformUm {
+    let old_width = f64::from(old_group.width_um.max(1));
+    let old_height = f64::from(old_group.height_um.max(1));
+    let scale_x = f64::from(new_group.width_um) / old_width;
+    let scale_y = f64::from(new_group.height_um) / old_height;
+    let old_center = (
+        old_group.x_um as f64 + old_width / 2.0,
+        old_group.y_um as f64 + old_height / 2.0,
+    );
+    let new_center = (
+        new_group.x_um as f64 + f64::from(new_group.width_um) / 2.0,
+        new_group.y_um as f64 + f64::from(new_group.height_um) / 2.0,
+    );
+    let child_center = (
+        child.x_um as f64 + f64::from(child.width_um) / 2.0,
+        child.y_um as f64 + f64::from(child.height_um) / 2.0,
+    );
+    let old_radians = -(f64::from(old_group.rotation_mdeg) / 1_000.0).to_radians();
+    let (old_sin, old_cos) = old_radians.sin_cos();
+    let dx = child_center.0 - old_center.0;
+    let dy = child_center.1 - old_center.1;
+    let mut local_x = dx * old_cos - dy * old_sin;
+    let mut local_y = dx * old_sin + dy * old_cos;
+    if old_group.flip_x {
+        local_x = -local_x;
+    }
+    if old_group.flip_y {
+        local_y = -local_y;
+    }
+    local_x *= scale_x;
+    local_y *= scale_y;
+    if new_group.flip_x {
+        local_x = -local_x;
+    }
+    if new_group.flip_y {
+        local_y = -local_y;
+    }
+    let new_radians = (f64::from(new_group.rotation_mdeg) / 1_000.0).to_radians();
+    let (new_sin, new_cos) = new_radians.sin_cos();
+    let next_center_x = new_center.0 + local_x * new_cos - local_y * new_sin;
+    let next_center_y = new_center.1 + local_x * new_sin + local_y * new_cos;
+    let next_width = (f64::from(child.width_um) * scale_x.abs()).round().max(1.0) as u32;
+    let next_height = (f64::from(child.height_um) * scale_y.abs())
+        .round()
+        .max(1.0) as u32;
+    TransformUm {
+        x_um: (next_center_x - f64::from(next_width) / 2.0).round() as i64,
+        y_um: (next_center_y - f64::from(next_height) / 2.0).round() as i64,
+        width_um: next_width,
+        height_um: next_height,
+        rotation_mdeg: child.rotation_mdeg + new_group.rotation_mdeg - old_group.rotation_mdeg,
+        flip_x: child.flip_x ^ old_group.flip_x ^ new_group.flip_x,
+        flip_y: child.flip_y ^ old_group.flip_y ^ new_group.flip_y,
+    }
 }
 
 fn ungroup_layer(document: &mut AtelierDocument, group_id: LayerId) -> Result<(), CommandError> {

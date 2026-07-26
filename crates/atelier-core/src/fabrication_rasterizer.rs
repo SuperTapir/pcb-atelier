@@ -1,9 +1,15 @@
 //! Project-bundle rasterizer for resolved fabrication masks.
 //!
-//! Images come only from the supplied `ProjectBundle`; text comes only from
-//! the embedded Noto Sans CJK SC bytes shipped with this application. No
-//! system font lookup is performed.
+//! Images come only from the supplied `ProjectBundle`. Text uses the selected
+//! system font when it is available and falls back to the embedded Noto Sans
+//! CJK SC bytes shipped with this application.
 
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::OnceLock,
+};
+
+use fontdb::{Database, Family, Query};
 use fontdue::Font;
 use image::{DynamicImage, GenericImageView};
 use sha2::{Digest, Sha256};
@@ -16,25 +22,70 @@ use crate::{
 pub const ALPHA_THRESHOLD: u8 = 128;
 const RASTERIZER_VERSION: &str = "atelier-bundle-rasterizer-v2";
 const NOTO_SANS_CJK_SC: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSC-Regular.otf");
+static SYSTEM_FONT_DATABASE: OnceLock<Database> = OnceLock::new();
+
+fn system_font_database() -> &'static Database {
+    SYSTEM_FONT_DATABASE.get_or_init(|| {
+        let mut database = Database::new();
+        database.load_system_fonts();
+        database
+    })
+}
 
 pub struct ProjectBundleRasterizer<'a> {
     bundle: &'a ProjectBundle,
-    font: Font,
+    fonts: HashMap<String, Font>,
     font_fingerprint: String,
 }
 
 impl<'a> ProjectBundleRasterizer<'a> {
     pub fn new(bundle: &'a ProjectBundle) -> Result<Self, String> {
-        let font = Font::from_bytes(NOTO_SANS_CJK_SC, fontdue::FontSettings::default())
+        let fallback = Font::from_bytes(NOTO_SANS_CJK_SC, fontdue::FontSettings::default())
             .map_err(|error| format!("embedded Noto Sans CJK SC font is invalid: {error}"))?;
-        let font_fingerprint = format!(
-            "{}:{}",
-            RASTERIZER_VERSION,
+        let mut fonts = HashMap::from([("sans-serif".to_owned(), fallback)]);
+        let mut fingerprints = vec![format!(
+            "sans-serif:{}",
             hex(&Sha256::digest(NOTO_SANS_CJK_SC))
-        );
+        )];
+        let database = system_font_database();
+        let families = bundle
+            .document
+            .front
+            .layers
+            .iter()
+            .chain(&bundle.document.back.layers)
+            .filter_map(|layer| match &layer.kind {
+                crate::ContentKind::Text(text) if text.font_family != "sans-serif" => {
+                    Some(text.font_family.clone())
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for family in families {
+            let query = Query {
+                families: &[Family::Name(&family)],
+                ..Query::default()
+            };
+            let Some(id) = database.query(&query) else {
+                continue;
+            };
+            let loaded = database.with_face_data(id, |bytes, face_index| {
+                let settings = fontdue::FontSettings {
+                    collection_index: face_index,
+                    ..fontdue::FontSettings::default()
+                };
+                Font::from_bytes(bytes, settings).map(|font| (font, hex(&Sha256::digest(bytes))))
+            });
+            if let Some(Ok((font, fingerprint))) = loaded {
+                fingerprints.push(format!("{family}:{fingerprint}"));
+                fonts.insert(family, font);
+            }
+        }
+        fingerprints.sort();
+        let font_fingerprint = format!("{RASTERIZER_VERSION}:{}", fingerprints.join("|"));
         Ok(Self {
             bundle,
-            font,
+            fonts,
             font_fingerprint,
         })
     }
@@ -81,6 +132,11 @@ impl<'a> ProjectBundleRasterizer<'a> {
         transform: TransformUm,
         grid: &RasterGrid,
     ) -> Result<BitMask, String> {
+        let font = self
+            .fonts
+            .get(&text.font_family)
+            .or_else(|| self.fonts.get("sans-serif"))
+            .expect("embedded fallback font must exist");
         let mut mask =
             BitMask::new(grid.width_px, grid.height_px).map_err(|error| error.to_string())?;
         let pixels_per_em = (text.font_size_um as f32 / grid.pixel_pitch_um as f32).max(1.0);
@@ -95,7 +151,7 @@ impl<'a> ProjectBundleRasterizer<'a> {
                 baseline += line_height;
                 continue;
             }
-            let (metrics, bitmap) = self.font.rasterize(character, pixels_per_em);
+            let (metrics, bitmap) = font.rasterize(character, pixels_per_em);
             let advance = metrics.advance_width.ceil() as i32;
             if matches!(text.layout, crate::TextLayout::FixedFrame)
                 && pen_x > 0
@@ -137,6 +193,15 @@ impl<'a> ProjectBundleRasterizer<'a> {
         }
         Ok(mask)
     }
+}
+
+pub fn system_font_families() -> Vec<String> {
+    system_font_database()
+        .faces()
+        .flat_map(|face| face.families.iter().map(|(family, _)| family.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 impl FabricationRasterizer for ProjectBundleRasterizer<'_> {

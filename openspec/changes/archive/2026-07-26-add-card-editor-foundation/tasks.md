@@ -49,3 +49,4 @@
 - [x] 6.3 补充用户操作说明、工程 schema 说明、导出限制与“EDA 为单向下游出口”的行为说明
 - [x] 6.4 运行 Rust、Vitest、Playwright、双画板 Konva 性能基准、Three.js 预览交互与黄金导出验证，并记录首个端到端验收报告
 - [x] 6.5 移除 Web 的硬编码 `8 × 5` 预览和不完整测试 IPC；验证 Web 图片插入、分组/解组、真实 ResolvedFabricationBoard 预览及与 Tauri 的契约/哈希等价
+- [x] 6.6 修复桌面预览性能与一致性：预览纹理使用 PNG 紧凑传输，按工程 revision 缓存并复用 ResolvedFabricationBoard，Tauri 在后台线程编译，编辑态合并刷新；以 Rust 像素测试和浏览器截图验证图片、文字、铺铜及阻焊颜色进入真实 3D 成板纹理

@@ -15,6 +15,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 atelier-core = { path = "../../../crates/atelier-core" }
+base64.workspace = true
+image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = [] }
@@ -23,7 +25,6 @@ tiny_http = "0.12"
 
 [dev-dependencies]
 atelier-cli = { path = "../../../crates/atelier-cli" }
-image.workspace = true
 tempfile.workspace = true
 
 [[bin]]

@@ -10,14 +10,45 @@ describe("workspaceReducer", () => {
     const state = [
       { type: "setWorkspaceMode", workspaceMode: "preview" } as const,
       { type: "setEditLayout", editLayout: "focus" } as const,
+      {
+        type: "setBoardArrangement",
+        boardArrangement: "horizontal",
+      } as const,
       { type: "setFace", face: "back" } as const,
       { type: "setTool", tool: "text" } as const,
     ].reduce(workspaceReducer, createInitialWorkspaceState());
 
     expect(state.workspaceMode).toBe("preview");
     expect(state.editLayout).toBe("focus");
+    expect(state.boardArrangement).toBe("horizontal");
     expect(state.activeFace).toBe("back");
     expect(state.tool).toBe("text");
+  });
+
+  it("changes board arrangement without losing either face state", () => {
+    let state = createInitialWorkspaceState();
+    state = workspaceReducer(state, {
+      type: "setSelection",
+      face: "front",
+      layerIds: ["front-title"],
+    });
+    state = workspaceReducer(state, {
+      type: "setViewport",
+      face: "back",
+      viewport: { zoom: 1.4, panX: 20, panY: -10 },
+    });
+    state = workspaceReducer(state, {
+      type: "setBoardArrangement",
+      boardArrangement: "vertical",
+    });
+
+    expect(state.boardArrangement).toBe("vertical");
+    expect(state.selections.front).toEqual(["front-title"]);
+    expect(state.viewports.back).toEqual({
+      zoom: 1.4,
+      panX: 20,
+      panY: -10,
+    });
   });
 
   it("does not lose either face selection when mode, layout or active face changes", () => {

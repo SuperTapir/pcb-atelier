@@ -2,6 +2,7 @@ export type WorkspaceTool = "select" | "text" | "image";
 export type CardFace = "front" | "back";
 export type WorkspaceMode = "edit" | "preview";
 export type EditLayout = "both" | "focus";
+export type BoardArrangement = "auto" | "horizontal" | "vertical";
 export type WorkContext = "copper" | "solderMaskOpen" | "silkscreen";
 
 export interface CanvasViewport {
@@ -13,6 +14,7 @@ export interface CanvasViewport {
 export interface WorkspaceState {
   workspaceMode: WorkspaceMode;
   editLayout: EditLayout;
+  boardArrangement: BoardArrangement;
   activeFace: CardFace;
   tool: WorkspaceTool;
   inspectorTarget: "board" | "face";
@@ -24,6 +26,7 @@ export interface WorkspaceState {
 export type WorkspaceAction =
   | { type: "setWorkspaceMode"; workspaceMode: WorkspaceMode }
   | { type: "setEditLayout"; editLayout: EditLayout }
+  | { type: "setBoardArrangement"; boardArrangement: BoardArrangement }
   | { type: "setFace"; face: CardFace }
   | { type: "setTool"; tool: WorkspaceTool }
   | { type: "selectBoard" }
@@ -49,6 +52,7 @@ export function createInitialWorkspaceState(): WorkspaceState {
   return {
     workspaceMode: "edit",
     editLayout: "both",
+    boardArrangement: "auto",
     activeFace: "front",
     tool: "select",
     inspectorTarget: "face",
@@ -76,6 +80,8 @@ export function workspaceReducer(
       return { ...state, workspaceMode: action.workspaceMode };
     case "setEditLayout":
       return { ...state, editLayout: action.editLayout };
+    case "setBoardArrangement":
+      return { ...state, boardArrangement: action.boardArrangement };
     case "setFace":
       return { ...state, activeFace: action.face, inspectorTarget: "face" };
     case "setTool":

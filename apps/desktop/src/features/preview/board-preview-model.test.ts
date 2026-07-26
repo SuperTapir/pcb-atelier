@@ -18,16 +18,16 @@ describe("BoardPreviewInput", () => {
     });
   });
 
-  it("accepts one exact RGBA texture for each physical card face", () => {
+  it("accepts one encoded PNG texture for each physical card face", () => {
     expect(validateBoardPreviewInput(previewInput())).toEqual([]);
   });
 
-  it("rejects malformed texture buffers instead of guessing preview pixels", () => {
+  it("rejects non-PNG texture payloads instead of guessing preview pixels", () => {
     const input = previewInput();
-    input.textures.back.rgba.pop();
+    input.textures.back.pngDataUrl = "data:image/jpeg;base64,fixture";
 
     expect(validateBoardPreviewInput(input)).toContain(
-      "back texture has 15 RGBA bytes; expected 16",
+      "back texture must be a PNG data URL",
     );
   });
 });
@@ -41,24 +41,21 @@ function previewInput(): BoardPreviewInput {
       cornerRadiusUm: 2_000,
     },
     thicknessUm: 1_600,
+    fabricationInputSha256: "a".repeat(64),
+    fabricationOutputSha256: "b".repeat(64),
     textures: {
+      palette: { solderMask: { r: 20, g: 105, b: 65, a: 255 } },
       front: {
         side: "front",
         widthPx: 2,
         heightPx: 2,
-        rgba: [
-          20, 105, 65, 255, 20, 105, 65, 255, 20, 105, 65, 255, 20, 105,
-          65, 255,
-        ],
+        pngDataUrl: "data:image/png;base64,front",
       },
       back: {
         side: "back",
         widthPx: 2,
         heightPx: 2,
-        rgba: [
-          20, 105, 65, 255, 20, 105, 65, 255, 20, 105, 65, 255, 20, 105,
-          65, 255,
-        ],
+        pngDataUrl: "data:image/png;base64,back",
       },
     },
   };

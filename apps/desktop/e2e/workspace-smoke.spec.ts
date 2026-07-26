@@ -16,6 +16,8 @@ test("编辑模式默认同时显示正反双画板，点击画板切换活动�
 
   await expect(front).toBeVisible();
   await expect(back).toBeVisible();
+  await expect(front).toHaveAttribute("data-edit-orientation", "upright");
+  await expect(back).toHaveAttribute("data-edit-orientation", "upright");
   await expect(page.getByTestId("edit-board-layout")).toHaveAttribute(
     "data-layout",
     "both",
@@ -65,6 +67,29 @@ test("正反两面的选择状态在活动卡面切换后分别保留", async ({
   ).toContainText("正面说明");
 });
 
+test("对象图层可在左侧双击重命名并通过撤销恢复", async ({ page }) => {
+  const tree = page.getByRole("tree", { name: "板体与生产层" });
+  const source = tree
+    .getByRole("treeitem")
+    .filter({ hasText: "正面说明" });
+
+  await source
+    .getByRole("button", { name: "正面说明", exact: true })
+    .dblclick();
+  const editor = tree.getByRole("textbox", { name: "重命名 正面说明" });
+  await expect(editor).toBeVisible();
+  await editor.fill("正面副标题");
+  await editor.press("Enter");
+
+  await expect(
+    tree.getByRole("button", { name: "正面副标题", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "撤销" }).click();
+  await expect(
+    tree.getByRole("button", { name: "正面说明", exact: true }),
+  ).toBeVisible();
+});
+
 test("聚焦当前面只隐藏非活动画板，恢复同时查看后活动面不变", async ({
   page,
 }) => {
@@ -82,6 +107,28 @@ test("聚焦当前面只隐藏非活动画板，恢复同时查看后活动面�
   await layout.getByRole("button", { name: "同时查看" }).click();
   await expect(page.getByTestId("workspace-canvas-front")).toBeVisible();
   await expect(page.getByTestId("workspace-canvas-back")).toBeVisible();
+  await expect(page.getByTestId("workspace-canvas-back")).toHaveAttribute(
+    "data-active",
+    "true",
+  );
+});
+
+test("同时查看可强制左右或上下排列且不丢失活动卡面", async ({ page }) => {
+  const arrangement = page.getByRole("group", { name: "画板排列" });
+  const layout = page.getByTestId("edit-board-layout");
+  await clickCanvas(page.getByTestId("workspace-canvas-back"));
+
+  await arrangement.getByRole("button", { name: "左右" }).click();
+  await expect(layout).toHaveAttribute("data-arrangement", "horizontal");
+  await expect(page.getByTestId("workspace-canvas-front")).toBeVisible();
+  await expect(page.getByTestId("workspace-canvas-back")).toHaveAttribute(
+    "data-active",
+    "true",
+  );
+
+  await arrangement.getByRole("button", { name: "上下" }).click();
+  await expect(layout).toHaveAttribute("data-arrangement", "vertical");
+  await expect(page.getByTestId("workspace-canvas-front")).toBeVisible();
   await expect(page.getByTestId("workspace-canvas-back")).toHaveAttribute(
     "data-active",
     "true",
@@ -109,6 +156,41 @@ test("编辑与预览模式正交，预览显示 3D canvas，返回编辑恢复�
     "true",
   );
   await expect(page.getByTestId("workspace-canvas-front")).toBeVisible();
+});
+
+test("阻焊颜色进入真实编译纹理，切换预览保持流畅且画面发生变化", async ({
+  page,
+}) => {
+  const modes = page.getByRole("group", { name: "工作模式" });
+  const maskColor = page.getByRole("combobox", { name: "阻焊颜色" });
+
+  await page.getByTestId("board-root").click();
+  await maskColor.selectOption("black");
+  await expect(page.getByRole("status")).toContainText("板体工艺参数已更新");
+  await modes.getByRole("button", { name: "预览" }).click();
+
+  const preview = page.getByTestId("board-3d-preview");
+  await expect(preview).toBeVisible({ timeout: 5_000 });
+  await expect(preview).toHaveAttribute("data-solder-mask-rgb", "27,29,28");
+  const blackPreview = await preview.screenshot();
+
+  await modes.getByRole("button", { name: "编辑" }).click();
+  await page.getByTestId("board-root").click();
+  await maskColor.selectOption("white");
+  await expect(page.getByRole("status")).toContainText("板体工艺参数已更新");
+  await modes.getByRole("button", { name: "预览" }).click();
+
+  await expect(preview).toBeVisible({ timeout: 5_000 });
+  await expect(preview).toHaveAttribute(
+    "data-solder-mask-rgb",
+    "226,228,222",
+    { timeout: 5_000 },
+  );
+  await expect
+    .poll(async () => (await preview.screenshot()).equals(blackPreview), {
+      timeout: 5_000,
+    })
+    .toBe(false);
 });
 
 test("活动卡面决定插入目标，生产层上下文自动建立映射", async ({
@@ -142,6 +224,32 @@ test("活动卡面决定插入目标，生产层上下文自动建立映射", as
       .getByRole("group", { name: "正面" })
       .getByText("文字", { exact: true }),
   ).toHaveCount(0);
+});
+
+test("文字检查器可以选择本机字体并用物理尺寸调整字号", async ({ page }) => {
+  const tree = page.getByRole("tree", { name: "板体与生产层" });
+  await tree
+    .getByRole("treeitem")
+    .filter({ hasText: "正面说明" })
+    .getByRole("button", { name: "正面说明", exact: true })
+    .click();
+
+  const font = page.getByRole("combobox", { name: "字体" });
+  const fontSize = page.getByRole("textbox", { name: "字号 (mm)" });
+  await expect(font).toBeVisible();
+  await expect(fontSize).toHaveValue("4.000");
+  await expect(font.locator("option")).not.toHaveCount(1);
+
+  const localFamily = await font.locator("option").nth(1).getAttribute("value");
+  expect(localFamily).toBeTruthy();
+  await font.selectOption(localFamily!);
+  await expect(page.getByRole("status")).toContainText("文字样式已更新");
+  await expect(font).toHaveValue(localFamily!);
+
+  await fontSize.fill("6.500");
+  await fontSize.press("Enter");
+  await expect(page.getByRole("status")).toContainText("文字样式已更新");
+  await expect(fontSize).toHaveValue("6.500");
 });
 
 test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", async ({
@@ -186,7 +294,24 @@ test("Web 左树多选可以通过共享服务完成分组与解组", async ({ p
   await expect(groupButton).toBeEnabled();
   await groupButton.click();
   await expect(page.getByRole("status")).toContainText("已分组");
-  await expect(back.getByText("组合", { exact: true })).toBeVisible();
+  const group = back.getByRole("treeitem").filter({ hasText: "组合" });
+  await expect(group.getByText("组合", { exact: true })).toBeVisible();
+
+  const groupX = page.getByRole("textbox", { name: "X (mm)" });
+  await expect(groupX).toHaveValue("8.000");
+  await groupX.fill("10");
+  await groupX.press("Enter");
+  await expect(page.getByRole("status")).toContainText("变换已更新");
+
+  await group.getByRole("button", { name: "组合", exact: true }).click();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("status")).toContainText("已进入组合");
+  await mark.getByRole("button", { name: "背面标记", exact: true }).click();
+  await expect(groupX).toHaveValue("10.000");
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("status")).toContainText("已退出组合");
+  await expect(group).toHaveAttribute("aria-selected", "true");
 
   const ungroupButton = page.getByRole("button", { name: "解组", exact: true });
   await expect(ungroupButton).toBeEnabled();

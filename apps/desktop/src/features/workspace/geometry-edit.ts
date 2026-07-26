@@ -176,6 +176,106 @@ export function nudgeTransform(
   });
 }
 
+export function applyGroupTransform<T extends GeometryLayer>(
+  layers: readonly T[],
+  groupId: string,
+  nextGroup: TransformUm,
+): T[] {
+  const group = layers.find((layer) => layer.id === groupId);
+  if (!group) {
+    throw new GeometryEditError("invalidLayerHierarchy", `找不到组合“${groupId}”`);
+  }
+  assertLayerEditable(group, layers);
+  const descendants = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const layer of layers) {
+      if (
+        layer.parentId === groupId ||
+        (layer.parentId !== null && descendants.has(layer.parentId))
+      ) {
+        const before = descendants.size;
+        descendants.add(layer.id);
+        changed ||= descendants.size !== before;
+      }
+    }
+  }
+  return layers.map((layer) => {
+    if (layer.id === groupId) {
+      return { ...layer, transform: nextGroup };
+    }
+    if (!descendants.has(layer.id)) return layer;
+    return {
+      ...layer,
+      transform: transformRelativeToGroup(
+        layer.transform,
+        group.transform,
+        nextGroup,
+      ),
+    };
+  });
+}
+
+function transformRelativeToGroup(
+  child: TransformUm,
+  oldGroup: TransformUm,
+  newGroup: TransformUm,
+): TransformUm {
+  const oldWidth = Math.max(1, oldGroup.widthUm);
+  const oldHeight = Math.max(1, oldGroup.heightUm);
+  const scaleX = newGroup.widthUm / oldWidth;
+  const scaleY = newGroup.heightUm / oldHeight;
+  const oldCenter = {
+    x: oldGroup.xUm + oldWidth / 2,
+    y: oldGroup.yUm + oldHeight / 2,
+  };
+  const newCenter = {
+    x: newGroup.xUm + newGroup.widthUm / 2,
+    y: newGroup.yUm + newGroup.heightUm / 2,
+  };
+  const childCenter = {
+    x: child.xUm + child.widthUm / 2,
+    y: child.yUm + child.heightUm / 2,
+  };
+  const oldRadians = (-oldGroup.rotationMdeg / 1_000) * (Math.PI / 180);
+  let localX =
+    (childCenter.x - oldCenter.x) * Math.cos(oldRadians) -
+    (childCenter.y - oldCenter.y) * Math.sin(oldRadians);
+  let localY =
+    (childCenter.x - oldCenter.x) * Math.sin(oldRadians) +
+    (childCenter.y - oldCenter.y) * Math.cos(oldRadians);
+  if (oldGroup.flipX) localX = -localX;
+  if (oldGroup.flipY) localY = -localY;
+  localX *= scaleX;
+  localY *= scaleY;
+  if (newGroup.flipX) localX = -localX;
+  if (newGroup.flipY) localY = -localY;
+  const newRadians = (newGroup.rotationMdeg / 1_000) * (Math.PI / 180);
+  const centerX =
+    newCenter.x +
+    localX * Math.cos(newRadians) -
+    localY * Math.sin(newRadians);
+  const centerY =
+    newCenter.y +
+    localX * Math.sin(newRadians) +
+    localY * Math.cos(newRadians);
+  const widthUm = Math.max(1, Math.round(child.widthUm * Math.abs(scaleX)));
+  const heightUm = Math.max(1, Math.round(child.heightUm * Math.abs(scaleY)));
+  return {
+    xUm: Math.round(centerX - widthUm / 2),
+    yUm: Math.round(centerY - heightUm / 2),
+    widthUm,
+    heightUm,
+    rotationMdeg:
+      child.rotationMdeg +
+      newGroup.rotationMdeg -
+      oldGroup.rotationMdeg,
+    flipX: child.flipX !== (oldGroup.flipX !== newGroup.flipX),
+    flipY: child.flipY !== (oldGroup.flipY !== newGroup.flipY),
+  };
+}
+
 /**
  * Calculate the physical AABB after rotation around the object's centre.
  * Flips do not change the AABB.
@@ -408,6 +508,7 @@ function objectCandidates(
     .filter(
       (target) =>
         target.id !== movingLayerId &&
+        !areAncestorAndDescendant(movingLayerId, target.id, layers) &&
         target.visible !== false &&
         target.transform.widthUm > 0 &&
         target.transform.heightUm > 0,
@@ -461,6 +562,23 @@ function objectCandidates(
         ),
       ];
     });
+}
+
+function areAncestorAndDescendant(
+  leftId: string,
+  rightId: string,
+  layers: readonly GeometryLayer[],
+) {
+  const byId = new Map(layers.map((layer) => [layer.id, layer]));
+  const hasAncestor = (layerId: string, ancestorId: string) => {
+    let parentId = byId.get(layerId)?.parentId ?? null;
+    while (parentId) {
+      if (parentId === ancestorId) return true;
+      parentId = byId.get(parentId)?.parentId ?? null;
+    }
+    return false;
+  };
+  return hasAncestor(leftId, rightId) || hasAncestor(rightId, leftId);
 }
 
 function edgeCandidates(

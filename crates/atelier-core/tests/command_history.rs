@@ -131,6 +131,10 @@ fn grouping_and_ungrouping_keep_selected_layers_ordered() {
     assert_eq!(document.front.layers[0].id, group_id);
     assert_eq!(document.front.layers[1].parent_id, Some(group_id));
     assert_eq!(document.front.layers[2].parent_id, Some(group_id));
+    assert_eq!(
+        document.front.layers[0].transform,
+        TransformUm::rect(1_000, 2_000, 11_000, 5_000)
+    );
 
     history
         .execute(&mut document, DocumentCommand::UngroupLayer { group_id })
@@ -152,6 +156,89 @@ fn grouping_and_ungrouping_keep_selected_layers_ordered() {
             .iter()
             .all(|layer| layer.parent_id.is_none())
     );
+}
+
+#[test]
+fn transforming_group_updates_all_members_as_one_atomic_edit() {
+    let mut document = AtelierDocument::new_card("组合变换", 100_000, 100_000);
+    let first = ContentLayer::new_text(
+        "第一层",
+        "A",
+        TransformUm::rect(1_000, 2_000, 10_000, 5_000),
+    );
+    let second = ContentLayer::new_text(
+        "第二层",
+        "B",
+        TransformUm::rect(20_000, 2_000, 10_000, 5_000),
+    );
+    let first_id = first.id;
+    let second_id = second.id;
+    let group = ContentLayer::new_group("组合");
+    let group_id = group.id;
+    document.front.layers.extend([first, second]);
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::GroupLayers {
+                side: CardSide::Front,
+                group,
+                layer_ids: vec![first_id, second_id],
+            },
+        )
+        .expect("group layers");
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::TransformLayer {
+                layer_id: group_id,
+                transform: TransformUm::rect(6_000, 7_000, 58_000, 10_000),
+            },
+        )
+        .expect("transform group");
+
+    assert_eq!(
+        document.front.layers[0].transform,
+        TransformUm::rect(6_000, 7_000, 58_000, 10_000)
+    );
+    assert_eq!(
+        document.front.layers[1].transform,
+        TransformUm::rect(6_000, 7_000, 20_000, 10_000)
+    );
+    assert_eq!(
+        document.front.layers[2].transform,
+        TransformUm::rect(44_000, 7_000, 20_000, 10_000)
+    );
+    assert_eq!(history.undo_depth(), 2);
+
+    history.undo(&mut document).expect("undo group transform");
+    assert_eq!(
+        document.front.layers[1].transform,
+        TransformUm::rect(1_000, 2_000, 10_000, 5_000)
+    );
+    assert_eq!(
+        document.front.layers[2].transform,
+        TransformUm::rect(20_000, 2_000, 10_000, 5_000)
+    );
+}
+
+#[test]
+fn grouping_requires_at_least_two_layers() {
+    let mut document = AtelierDocument::new_card("无效组合", 64_000, 100_000);
+    let layer = text_layer("单层", 1_000);
+    let layer_id = layer.id;
+    document.front.layers.push(layer);
+
+    let error = DocumentCommand::GroupLayers {
+        side: CardSide::Front,
+        group: ContentLayer::new_group("组合"),
+        layer_ids: vec![layer_id],
+    }
+    .apply(&mut document)
+    .expect_err("single layer must not form a group");
+
+    assert!(matches!(error, CommandError::InsufficientGroupMembers));
 }
 
 #[test]

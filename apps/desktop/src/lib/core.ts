@@ -209,6 +209,11 @@ export interface InsertTextInput {
   layout: "autoWidth" | "fixedFrame";
 }
 
+export interface FontCatalog {
+  families: string[];
+  fallbackFamily: string;
+}
+
 async function invokeCore<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -274,6 +279,10 @@ export function getWorkspaceDocument(): Promise<WorkspaceDocument> {
   return invokeCore<WorkspaceDocument>("get_workspace_document");
 }
 
+export function getSystemFonts(): Promise<FontCatalog> {
+  return invokeCore<FontCatalog>("get_system_fonts");
+}
+
 export function getBoardPreview(): Promise<WorkspaceBoardPreview> {
   return invokeCore<WorkspaceBoardPreview>("get_board_preview");
 }
@@ -315,6 +324,25 @@ export function setTextContent(
 ): Promise<WorkspaceDocument> {
   return invokeCore<WorkspaceDocument>("set_text_content", {
     request: { layerId, text },
+  });
+}
+
+export function setTextStyle(
+  layerId: string,
+  fontFamily: string,
+  fontSizeUm: number,
+): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("set_text_style", {
+    request: { layerId, fontFamily, fontSizeUm },
+  });
+}
+
+export function setLayerName(
+  layerId: string,
+  name: string,
+): Promise<WorkspaceDocument> {
+  return invokeCore("set_layer_name", {
+    request: { layerId, name },
   });
 }
 
