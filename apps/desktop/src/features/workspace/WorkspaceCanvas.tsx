@@ -333,22 +333,6 @@ export function WorkspaceCanvas({
                 width={boardWidthMm}
                 y={boardHeightMm / 2 - 1.6}
               />
-              <Line
-                points={
-                  face === "front"
-                    ? [4, 4, 10, 4, 4, 10]
-                    : [
-                        boardWidthMm - 4,
-                        4,
-                        boardWidthMm - 10,
-                        4,
-                        boardWidthMm - 4,
-                        10,
-                      ]
-                }
-                stroke={palette.marker}
-                strokeWidth={1 / transform.scale}
-              />
             </Group>
           </Layer>
           <Layer>
@@ -869,7 +853,6 @@ function getViewPalette(workContext: WorkContext) {
         boardStroke: "#0d2f26",
         gradient: undefined,
         label: "rgba(236, 245, 230, 0.5)",
-        marker: "#d9b65e",
       };
     case "solderMaskOpen":
       return {
@@ -877,7 +860,6 @@ function getViewPalette(workContext: WorkContext) {
         boardStroke: "#0b3326",
         gradient: [0, "#286b55", 0.48, "#174a39", 1, "#0f3529"],
         label: "rgba(247, 242, 213, 0.46)",
-        marker: "#e2c76f",
       };
     case "silkscreen":
       return {
@@ -885,7 +867,6 @@ function getViewPalette(workContext: WorkContext) {
         boardStroke: "#6f957f",
         gradient: [0, "#194f35", 1, "#0f3a27"],
         label: "rgba(247, 246, 236, 0.75)",
-        marker: "rgba(247, 246, 236, 0.9)",
       };
   }
 }
