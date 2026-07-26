@@ -1,0 +1,34 @@
+schema: spec-driven
+
+context: |
+  PCB Atelier is a desktop authoring workspace for PCB artwork.
+  It combines asset management, content layers, basic non-destructive image
+  processing, PCB production-layer mapping, material preview, and EDA/Gerber
+  handoff. It is not a full electronics EDA or a full image editor.
+
+  Tech stack: Tauri 2, React, TypeScript, Tailwind CSS v4, shadcn/ui,
+  an independent Rust core, and a CLI that shares the same core.
+
+  Production layers are the source of truth. Material preview, CLI output,
+  EasyEDA handoff, and Gerber export must use the same geometry, physical
+  dimensions, polarity, origin, and front/back orientation.
+
+  Reuse proven algorithms, export logic, tests, and icon assets from
+  PCB_lightgraph Neo, but do not inherit its UI, project schema, or fixed
+  one-image/one-processing-workflow model.
+
+  Use physical units for manufacturing semantics. Keep GUI, CLI, and future
+  agent operations reproducible and reversible.
+
+rules:
+  proposal:
+    - State the real user workflow or failure being addressed.
+    - Include explicit non-goals.
+    - Identify how preview-to-export parity will be verified.
+  design:
+    - Keep the Rust core independent from Tauri and UI frameworks.
+    - Describe GUI and CLI behavior against the same domain operation.
+    - Distinguish content layers from PCB production layers.
+  tasks:
+    - Include automated verification for production geometry and export parity.
+    - Do not add unverified processing options without a reproducible case.
