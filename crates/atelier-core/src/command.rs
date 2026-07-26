@@ -519,13 +519,7 @@ fn group_layers(
         ensure_unlocked(&face(document, side).layers[index])?;
     }
 
-    let group_transform = bounds_for_layers(
-        layer_ids
-            .iter()
-            .map(|layer_id| layer(document, *layer_id))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter(),
-    );
+    let group_transform = bounds_for_selection(document, side, &layer_ids)?;
     let mut group = group;
     group.transform = group_transform;
     let selected_face = face_mut(document, side);
@@ -548,6 +542,33 @@ fn group_layers(
     remaining.splice(insert_index + 1..insert_index + 1, selected);
     selected_face.layers = remaining;
     Ok(())
+}
+
+fn bounds_for_selection(
+    document: &AtelierDocument,
+    side: CardSide,
+    layer_ids: &[LayerId],
+) -> Result<TransformUm, CommandError> {
+    let selected_face = face(document, side);
+    let mut transforms = Vec::new();
+    for layer_id in layer_ids {
+        let selected = layer(document, *layer_id)?;
+        if matches!(selected.kind, ContentKind::Group)
+            && (selected.transform.width_um == 0 || selected.transform.height_um == 0)
+        {
+            let descendants = descendant_ids(selected_face, selected.id);
+            transforms.extend(
+                selected_face
+                    .layers
+                    .iter()
+                    .filter(|candidate| descendants.contains(&candidate.id))
+                    .map(|candidate| candidate.transform),
+            );
+        } else {
+            transforms.push(selected.transform);
+        }
+    }
+    Ok(bounds_for_transforms(transforms))
 }
 
 fn transform_layer(
@@ -619,13 +640,16 @@ fn descendant_ids(face: &CardFace, group_id: LayerId) -> HashSet<LayerId> {
 }
 
 fn bounds_for_layers<'a>(layers: impl Iterator<Item = &'a ContentLayer>) -> TransformUm {
+    bounds_for_transforms(layers.map(|layer| layer.transform))
+}
+
+fn bounds_for_transforms(transforms: impl IntoIterator<Item = TransformUm>) -> TransformUm {
     let mut min_x = i64::MAX;
     let mut min_y = i64::MAX;
     let mut max_x = i64::MIN;
     let mut max_y = i64::MIN;
-    for layer in layers {
-        let (layer_min_x, layer_min_y, layer_max_x, layer_max_y) =
-            axis_aligned_bounds(layer.transform);
+    for transform in transforms {
+        let (layer_min_x, layer_min_y, layer_max_x, layer_max_y) = axis_aligned_bounds(transform);
         min_x = min_x.min(layer_min_x);
         min_y = min_y.min(layer_min_y);
         max_x = max_x.max(layer_max_x);

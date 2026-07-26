@@ -308,12 +308,16 @@ test("Web 左树多选可以通过共享服务完成分组与解组", async ({ p
   await expect(page.getByRole("status")).toContainText("变换已更新");
 
   await group.getByRole("button", { name: "组合", exact: true }).click();
-  await page.keyboard.press("Enter");
+  await page.evaluate(() =>
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })),
+  );
   await expect(page.getByRole("status")).toContainText("已进入组合");
   await mark.getByRole("button", { name: "背面标记", exact: true }).click();
   await expect(groupX).toHaveValue("10.000");
 
-  await page.keyboard.press("Escape");
+  await page.evaluate(() =>
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
+  );
   await expect(page.getByRole("status")).toContainText("已退出组合");
   await expect(group).toHaveAttribute("aria-selected", "true");
 

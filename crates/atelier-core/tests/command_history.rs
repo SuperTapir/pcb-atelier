@@ -221,6 +221,24 @@ fn transforming_group_updates_all_members_as_one_atomic_edit() {
         document.front.layers[2].transform,
         TransformUm::rect(20_000, 2_000, 10_000, 5_000)
     );
+
+    let mut rotated_group = document.front.layers[0].transform;
+    rotated_group.rotation_mdeg = 90_000;
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::TransformLayer {
+                layer_id: group_id,
+                transform: rotated_group,
+            },
+        )
+        .expect("rotate group");
+    assert_eq!(document.front.layers[1].transform.rotation_mdeg, 90_000);
+    assert_eq!(document.front.layers[2].transform.rotation_mdeg, 90_000);
+    assert_eq!(document.front.layers[1].transform.x_um, 10_500);
+    assert_eq!(document.front.layers[1].transform.y_um, -7_500);
+    assert_eq!(document.front.layers[2].transform.x_um, 10_500);
+    assert_eq!(document.front.layers[2].transform.y_um, 11_500);
 }
 
 #[test]
@@ -239,6 +257,39 @@ fn grouping_requires_at_least_two_layers() {
     .expect_err("single layer must not form a group");
 
     assert!(matches!(error, CommandError::InsufficientGroupMembers));
+}
+
+#[test]
+fn grouping_a_legacy_zero_sized_group_uses_its_descendant_bounds() {
+    let mut document = AtelierDocument::new_card("嵌套组合", 64_000, 100_000);
+    let legacy_group = ContentLayer::new_group("旧组合");
+    let legacy_group_id = legacy_group.id;
+    let mut child = text_layer("旧组合子层", 8_000);
+    child.parent_id = Some(legacy_group_id);
+    let peer = text_layer("同级对象", 20_000);
+    let peer_id = peer.id;
+    document.front.layers.extend([legacy_group, child, peer]);
+    let outer_group = ContentLayer::new_group("外层组合");
+    let outer_group_id = outer_group.id;
+
+    DocumentCommand::GroupLayers {
+        side: CardSide::Front,
+        group: outer_group,
+        layer_ids: vec![legacy_group_id, peer_id],
+    }
+    .apply(&mut document)
+    .expect("group legacy parent with peer");
+
+    let outer = document
+        .front
+        .layers
+        .iter()
+        .find(|layer| layer.id == outer_group_id)
+        .expect("outer group");
+    assert_eq!(
+        outer.transform,
+        TransformUm::rect(8_000, 2_000, 22_000, 5_000)
+    );
 }
 
 #[test]

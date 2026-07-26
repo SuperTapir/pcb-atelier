@@ -28,6 +28,7 @@ import {
   type TextDraft,
 } from "@/features/workspace/text-gesture";
 import {
+  applyGroupTransform,
   isLayerTransformEditable,
   snapTransform,
   type SnapGuide,
@@ -557,6 +558,66 @@ function ContentNode({
     });
     onSnapGuidesChange(result.guides);
   };
+  const previewGroupMembers = () => {
+    const node = nodeRef.current;
+    const stage = node?.getStage();
+    if (!node || !stage || layer.kind.type !== "group" || locked) return;
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    const widthUm = Math.max(
+      1,
+      Math.round(layer.transform.widthUm * Math.abs(scaleX)),
+    );
+    const heightUm = Math.max(
+      1,
+      Math.round(layer.transform.heightUm * Math.abs(scaleY)),
+    );
+    const previewLayers = applyGroupTransform(layers, layer.id, {
+      xUm: Math.round((node.x() - widthUm / 2_000) * 1_000),
+      yUm: Math.round((node.y() - heightUm / 2_000) * 1_000),
+      widthUm,
+      heightUm,
+      rotationMdeg: Math.round(node.rotation() * 1_000),
+      flipX: scaleX < 0,
+      flipY: scaleY < 0,
+    });
+    for (const previewLayer of previewLayers) {
+      const original = layers.find(
+        (candidate) => candidate.id === previewLayer.id,
+      );
+      if (
+        !original ||
+        previewLayer === original ||
+        previewLayer.id === layer.id
+      ) {
+        continue;
+      }
+      const sibling = stage.find(
+        (candidate: Konva.Node) => candidate.id() === previewLayer.id,
+      )[0];
+      if (!sibling) continue;
+      sibling.position({
+        x:
+          previewLayer.transform.xUm / 1_000 +
+          previewLayer.transform.widthUm / 2_000,
+        y:
+          previewLayer.transform.yUm / 1_000 +
+          previewLayer.transform.heightUm / 2_000,
+      });
+      sibling.rotation(previewLayer.transform.rotationMdeg / 1_000);
+      sibling.scale({
+        x:
+          (previewLayer.transform.flipX ? -1 : 1) *
+          (previewLayer.transform.widthUm /
+            Math.max(1, original.transform.widthUm)),
+        y:
+          (previewLayer.transform.flipY ? -1 : 1) *
+          (previewLayer.transform.heightUm /
+            Math.max(1, original.transform.heightUm)),
+      });
+    }
+    node.getLayer()?.batchDraw();
+  };
   return (
     <>
       <Group
@@ -601,8 +662,12 @@ function ContentNode({
         x={x + width / 2}
         y={y + height / 2}
         onDragStart={() => onSnapGuidesChange([])}
-        onDragMove={(event) => snapDraggedNode(event.evt.altKey)}
+        onDragMove={(event) => {
+          snapDraggedNode(event.evt.altKey);
+          previewGroupMembers();
+        }}
         onDragEnd={commitNodeTransform}
+        onTransform={previewGroupMembers}
         onTransformEnd={commitNodeTransform}
       >
         {layer.kind.type === "group" && (

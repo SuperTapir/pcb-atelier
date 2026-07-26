@@ -75,7 +75,8 @@ fn handle_request(
 
 fn local_development_document() -> atelier_core::AtelierDocument {
     let mut document = atelier_core::AtelierDocument::new_card("双面非对称黄金卡", 85_600, 53_980);
-    let group = ContentLayer::new_group("正面组合");
+    let mut group = ContentLayer::new_group("正面组合");
+    group.transform = TransformUm::rect(8_000, 8_000, 24_000, 6_000);
     let mut front_title = ContentLayer::new_text(
         "正面标题",
         "F",

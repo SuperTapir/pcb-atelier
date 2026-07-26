@@ -203,8 +203,7 @@ export function WorkspaceShell({
       const drillIntoGroup =
         clicked?.parentId !== null &&
         clicked?.parentId !== undefined &&
-        (drillGroupIds[face] === clicked.parentId ||
-          faceSelection.includes(clicked.parentId));
+        drillGroupIds[face] === clicked.parentId;
       const next = resolveLayerSelection({
         current: faceSelection,
         drillIntoGroup,
@@ -734,14 +733,16 @@ export function WorkspaceShell({
                   )
                 }
                 onSelectBoard={() => dispatch({ type: "selectBoard" })}
-                onSelectContext={(face, workContext) =>
+                onSelectContext={(face, workContext) => {
+                  dispatch({ type: "setFace", face });
                   dispatch({
                     type: "setWorkContext",
                     face,
                     workContext,
-                  })
-                }
+                  });
+                }}
                 onSelectSource={(face, layerId, event) => {
+                  dispatch({ type: "setFace", face });
                   selectLayer(face, layerId, event.shiftKey);
                   setEditingLayerId(null);
                 }}
