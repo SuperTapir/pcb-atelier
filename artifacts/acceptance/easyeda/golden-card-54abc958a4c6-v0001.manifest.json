@@ -1,0 +1,106 @@
+{
+  "exportFormatVersion": "atelier-easyeda-handoff-v1",
+  "exportVersion": "golden-card-54abc958a4c6-v0001",
+  "manifestPath": "artifacts/acceptance/easyeda/golden-card-54abc958a4c6-v0001.manifest.json",
+  "publicArchivePath": "artifacts/acceptance/easyeda/golden-card-54abc958a4c6-v0001.epro2",
+  "nativeProjectPath": "artifacts/acceptance/easyeda/golden-card-54abc958a4c6-v0001.eprj2",
+  "fabricationInputSha256": "1ffec8ba2a07a724171c0f8b24cdd2085510e38743a7c6f62d960ac8a1fc1cd1",
+  "fabricationOutputSha256": "54abc958a4c6c59f86070c6c42098cdc1f9d5673138a5d4e590a97d97923338e",
+  "publicArchiveSha256": "9f439596a1a694d6816dcdbaff322cf523837dfe38fa9b8e2e014f014e2a6323",
+  "nativeProjectSha256": "ab598561c0614760c6f431f89e757ba9d76ae15375b8bbb21b14d05afb428528",
+  "primitives": {
+    "fillCount": 11,
+    "holeCount": 1,
+    "filledLayerIds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "publicValidation": {
+    "isValid": true,
+    "errors": [],
+    "title": "Golden card",
+    "boardUuid": "7fd30357b01eac453226d6994e27d0d2",
+    "pcbUuid": "03be166ae3504ee7e3f3550868156350",
+    "boardWidthUm": 64000,
+    "boardHeightUm": 100000,
+    "fillCount": 11,
+    "holeCount": 1,
+    "filledLayerIds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ]
+  },
+  "nativeValidation": {
+    "isValid": true,
+    "errors": [],
+    "projectUuid": "86b68540c41a480e920ebabd8654f1bfabbcd3101a7b22bb9292c33e2773e003",
+    "branchUuid": "a06e5b7c2b6eaf46a99d408473ab6bac",
+    "historyUuid": "2d678e29358f10b9cce4603f125569c1",
+    "boardUuids": [
+      "7fd30357b01eac453226d6994e27d0d2"
+    ],
+    "pcbUuids": [
+      "03be166ae3504ee7e3f3550868156350"
+    ],
+    "payloadRecords": 18,
+    "tableCount": 35,
+    "indexCount": 49,
+    "boardWidthUm": 64000,
+    "boardHeightUm": 100000,
+    "fillCount": 11,
+    "holeCount": 1,
+    "filledLayerIds": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "solderMaskOpeningLayerIds": [
+      5,
+      6
+    ],
+    "layerXExtents": [
+      {
+        "layerId": 1,
+        "minXNanoMil": 511811024,
+        "maxXNanoMil": 826771654
+      },
+      {
+        "layerId": 2,
+        "minXNanoMil": 1299212598,
+        "maxXNanoMil": 2165354331
+      },
+      {
+        "layerId": 3,
+        "minXNanoMil": 1712598425,
+        "maxXNanoMil": 1771653543
+      },
+      {
+        "layerId": 4,
+        "minXNanoMil": 295275591,
+        "maxXNanoMil": 374015748
+      },
+      {
+        "layerId": 5,
+        "minXNanoMil": 511811024,
+        "maxXNanoMil": 826771654
+      },
+      {
+        "layerId": 6,
+        "minXNanoMil": 1299212598,
+        "maxXNanoMil": 2165354331
+      }
+    ]
+  }
+}

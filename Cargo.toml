@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "apps/desktop/src-tauri",
+    "crates/atelier-cli",
+    "crates/atelier-core",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes-gcm = "0.10"
+flate2 = "1"
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+rand = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }

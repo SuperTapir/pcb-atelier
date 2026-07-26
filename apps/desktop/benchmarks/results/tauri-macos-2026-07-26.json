@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "recordedAt": "2026-07-26T11:16:05.731Z",
+  "environment": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "osVersion": "26.5.2",
+    "hardware": "Mac13,1",
+    "runs": 3,
+    "window": {
+      "width": 1280,
+      "height": 800
+    }
+  },
+  "thresholds": {
+    "minimumFps": 45,
+    "maximumP95FrameMs": 33.333333333333336,
+    "slowFrameBoundaryMs": 22.22222222222222,
+    "maximumSlowFrameRatio": 0.2,
+    "maximumRssCycleGrowthKib": 32768,
+    "maximumRssCycleGrowthRatio": 0.2
+  },
+  "results": [
+    {
+      "run": 1,
+      "frames": {
+        "fps": 60.00491843593738,
+        "averageMs": 16.665300546448087,
+        "p95Ms": 17,
+        "maximumMs": 23,
+        "slowFrameRatio": 0.004098360655737705
+      },
+      "rss": {
+        "cycleGrowthKib": 64,
+        "cycleGrowthRatio": 0.0006501950585175553
+      },
+      "passed": true
+    },
+    {
+      "run": 2,
+      "frames": {
+        "fps": 59.94595037261485,
+        "averageMs": 16.68169398907104,
+        "p95Ms": 18,
+        "maximumMs": 23,
+        "slowFrameRatio": 0.009562841530054643
+      },
+      "rss": {
+        "cycleGrowthKib": -32,
+        "cycleGrowthRatio": -0.0003252561392096276
+      },
+      "passed": true
+    },
+    {
+      "run": 3,
+      "frames": {
+        "fps": 59.965593511919394,
+        "averageMs": 16.67622950819672,
+        "p95Ms": 18,
+        "maximumMs": 25,
+        "slowFrameRatio": 0.012295081967213116
+      },
+      "rss": {
+        "cycleGrowthKib": 0,
+        "cycleGrowthRatio": 0
+      },
+      "passed": true
+    }
+  ],
+  "median": {
+    "fps": 59.965593511919394,
+    "averageFrameMs": 16.67622950819672,
+    "p95FrameMs": 18,
+    "maximumFrameMs": 23,
+    "slowFrameRatio": 0.009562841530054643,
+    "rssCycleGrowthKib": 0,
+    "rssCycleGrowthRatio": 0
+  },
+  "passed": true,
+  "caveat": "WKWebView does not expose performance.memory. RSS checkpoints sample the benchmark host process and are a coarse leak guard; retained JavaScript heap still requires Web Inspector or Instruments for release sign-off."
+}

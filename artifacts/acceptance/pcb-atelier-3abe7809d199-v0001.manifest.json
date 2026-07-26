@@ -1,0 +1,51 @@
+{
+  "exportFormatVersion": "atelier-easyeda-handoff-v1",
+  "exportVersion": "pcb-atelier-3abe7809d199-v0001",
+  "manifestPath": "/Users/tapir/Development/pcb-atelier/artifacts/acceptance/pcb-atelier-3abe7809d199-v0001.manifest.json",
+  "publicArchivePath": "/Users/tapir/Development/pcb-atelier/artifacts/acceptance/pcb-atelier-3abe7809d199-v0001.epro2",
+  "nativeProjectPath": "/Users/tapir/Development/pcb-atelier/artifacts/acceptance/pcb-atelier-3abe7809d199-v0001.eprj2",
+  "fabricationInputSha256": "50a4d6ce2be60610cb16aa74fc0b9c1d22cd1f81195470ee9d97d425cf6e6fef",
+  "fabricationOutputSha256": "3abe7809d199f817454ba5876ad40d3e6a8f001f5ae8e32eb877d2fbaa3ed41b",
+  "publicArchiveSha256": "81154b48165faf6eb9a48dd6b13911f79e7ac685101f40fa8ba7c11ffce0d858",
+  "nativeProjectSha256": "448a01de7768620019079f206ea51e983b7a6cde12fcf546400e5b1bc3289271",
+  "primitives": {
+    "fillCount": 0,
+    "holeCount": 0,
+    "filledLayerIds": []
+  },
+  "publicValidation": {
+    "isValid": true,
+    "errors": [],
+    "title": "未命名卡片",
+    "boardUuid": "6c0e674efdf22eed212d90fbb0348b69",
+    "pcbUuid": "f23cb398f124c928e551ed6b7cf4b2c2",
+    "boardWidthUm": 64000,
+    "boardHeightUm": 100000,
+    "fillCount": 0,
+    "holeCount": 0,
+    "filledLayerIds": []
+  },
+  "nativeValidation": {
+    "isValid": true,
+    "errors": [],
+    "projectUuid": "dc2e34abb331827846d329cfb35baef52ec40475d92dcef676b7148e68710043",
+    "branchUuid": "7d09b50cd59d83c82db877818d1884ae",
+    "historyUuid": "a33db6ab77d03f0ee03c96ef43f8b775",
+    "boardUuids": [
+      "6c0e674efdf22eed212d90fbb0348b69"
+    ],
+    "pcbUuids": [
+      "f23cb398f124c928e551ed6b7cf4b2c2"
+    ],
+    "payloadRecords": 6,
+    "tableCount": 35,
+    "indexCount": 49,
+    "boardWidthUm": 64000,
+    "boardHeightUm": 100000,
+    "fillCount": 0,
+    "holeCount": 0,
+    "filledLayerIds": [],
+    "solderMaskOpeningLayerIds": [],
+    "layerXExtents": []
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tapir Craft"
+  short_description: "Tapir-style TDD and engineering methodology"
+  default_prompt: "Use $tapir-craft to confirm the goal or root cause, identify trade-offs, define a failing test or verification case, implement the change, and loop through validation."

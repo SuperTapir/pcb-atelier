@@ -8,6 +8,7 @@ target/
 dist/
 build/
 coverage/
+test-results/
 
 *.log
 *.tmp
@@ -15,3 +16,7 @@ coverage/
 # Local linked assets and generated manufacturing output.
 .atelier-cache/
 exports/
+
+# Third-party source studies. Keep the curated index, not cloned dependencies.
+reference/*
+!reference/README.md

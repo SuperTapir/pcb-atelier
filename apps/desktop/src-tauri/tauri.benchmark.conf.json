@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PCB Atelier Konva Benchmark",
+  "version": "0.1.0",
+  "identifier": "com.tapir.pcb-atelier.konva-benchmark",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PCB Atelier · Konva Release Benchmark",
+        "url": "benchmark.html",
+        "width": 1280,
+        "height": 800,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

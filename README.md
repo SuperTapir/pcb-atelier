@@ -13,7 +13,7 @@ AI、Photoshop、图片转换工具和 EDA 之间的重复工作，整理成一�
 可自动化的制作流程：
 
 ```text
-资产 → 内容图层 → 基础图像处理 → PCB 生产层 → 2D / 3D 预览 → EDA / Gerber
+资产 → 规则化插入 → 铜 / 阻焊开窗 / 丝印 → 2D 检查 / 3D 预览 → EDA
 ```
 
 ## Motivation
@@ -55,12 +55,13 @@ PCB Atelier 希望把图片处理、内容层叠、生产层映射、实体预�
 PCB Atelier 以项目为中心管理：
 
 - 原始插画、外部处理稿、蒙版、Logo 和文字等资产；
-- 可排序、分组、显隐和锁定的内容图层；
+- 在“板体 → 正面/背面 → 铜/阻焊开窗/丝印”左树中可排序、分组、显隐和锁定的
+  生产对象；内部源对象与显式映射不作为独立“内容”入口；
 - 灰度、黑白、反相、阈值、线宽和基础蒙版等非破坏处理；
 - 顶铜、顶阻焊、顶丝印及对应背面生产层；
 - 板框、孔位、焊盘和焊环；
 - 多生产层同时查看的精确 2D 生产预览，以及基于相同几何的 3D 材料预览；
-- EasyEDA 和 Gerber 制造交接；
+- EasyEDA 单向制造交接；Gerber 仍是后续方向；
 - 可复现、可批处理的 CLI。
 
 未来可以增加 Agent 面板，通过稳定的 Core API 或 CLI 帮助用户修改项目、
@@ -72,8 +73,10 @@ PCB Atelier 以项目为中心管理：
 
 - **Tauri 2** 提供轻量桌面外壳、文件系统集成、系统对话框、外部应用联动和
   前后端命令边界；
-- **React + TypeScript** 负责界面状态、图层面板、属性检查器、主题、Canvas
-  预览和用户操作；
+- **React + TypeScript + Konva** 负责界面状态、生产语言图层树、属性检查器与 2D
+  对象交互；生产层由 Rust Core 编译后以少量纹理进入画布，不展开为大量前端图元；
+- **Three.js + React Three Fiber** 负责只读整体成板预览，消费与导出相同的
+  `ResolvedFabricationBoard`，不承担编辑；
 - **Tailwind CSS v4 + shadcn/ui** 提供界面样式与基础组件；
 - **独立 Rust Core** 负责项目模型、图像处理、生产层编译、制造检查与导出，
   不依赖 Tauri；
@@ -98,7 +101,11 @@ PCB Atelier 不计划替代：
 
 ## 当前状态
 
-项目处于产品定义和架构初始化阶段。此时优先保证：
+项目已进入首个“类 EDA 卡片编辑器 → 嘉立创 EDA”垂直切片的实现阶段。当前已建立
+带版本的双面工程、图片/文字/组/基础铺铜领域模型、命令历史与 CLI、项目包、六层
+生产语义、统一生产板编译器，以及共享 Rust WorkspaceService 的 Web/Tauri 工作区。
+桌面顶层只有“编辑 / 预览”：编辑同时显示正背双画板，左树直接使用生产层语言；
+预览显示同源只读 3D 板体。此时优先保证：
 
 - 不继承旧项目“一张图片绑定一组固定处理”的核心模型；
 - 不以功能数量代替真实生产闭环；
@@ -106,10 +113,23 @@ PCB Atelier 不计划替代：
 - 2D / 3D 预览、EDA 和 Gerber 使用同一份生产层数据；几何、尺寸、方向、极性
   和裁切必须一致，材质效果则作为可信的视觉近似。
 
+当前仍未完成 `.pcba` 的桌面打开/保存、production Web 后端和 Gerber 直接导出。
+板体与叠层检查器、编辑态真实生产纹理和 Tauri 导出按钮已经接到 Core，但完整
+Web/Tauri 实际交互仍按验收任务继续验证。
+
+当前实现计划与验收任务见
+[OpenSpec：add-card-editor-foundation](openspec/changes/add-card-editor-foundation/)。
+
 ## 文档
 
+- [当前版本用户操作说明](docs/USER_GUIDE.md)
+- [工程 schema、坐标与图层语义](docs/PROJECT_SCHEMA.md)
+- [嘉立创 EDA 导出与单向交接](docs/EASYEDA_HANDOFF.md)
 - [完整产品规划](docs/PRODUCT_PLAN.md)
 - [架构决策记录](docs/ARCHITECTURE_DECISIONS.md)
+
+> 当前桌面界面仍处于垂直切片开发阶段。开始试用前请先阅读用户操作说明中的实际
+> 能力与“当前仍未完成”清单；README 上文的产品方向不等同于已经交付的 UI 能力。
 
 ## 与 PCB_lightgraph Neo 的关系
 
