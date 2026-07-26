@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   LinearFilter,
   LinearMipmapLinearFilter,
+  MeshStandardMaterial,
   SRGBColorSpace,
   Texture,
 } from "three";
@@ -10,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   Board3DPreview,
   board3DPreviewRenderer,
+  configureBoardFaceMaterial,
   configureBoardTexture,
 } from "@/features/preview/Board3DPreview";
 import type { BoardPreviewInput } from "@/features/preview/board-preview-renderer";
@@ -42,6 +44,18 @@ describe("Board3DPreview", () => {
     expect(texture.generateMipmaps).toBe(true);
     expect(texture.anisotropy).toBe(8);
     expect(texture.version).toBeGreaterThan(0);
+  });
+
+  it("keeps textured faces in front of body caps at grazing angles", () => {
+    const material = new MeshStandardMaterial();
+
+    configureBoardFaceMaterial(material);
+
+    expect(material.polygonOffset).toBe(true);
+    expect(material.polygonOffsetFactor).toBe(-2);
+    expect(material.polygonOffsetUnits).toBe(-2);
+    expect(material.version).toBeGreaterThan(0);
+    material.dispose();
   });
 });
 

@@ -24,7 +24,7 @@ import {
 } from "@/features/preview/board-preview-renderer";
 import { useTheme } from "@/features/theme/ThemeProvider";
 
-const FACE_OFFSET_MM = 0.01;
+const FACE_OFFSET_MM = 0.05;
 
 export function Board3DPreview({
   preview,
@@ -182,23 +182,29 @@ function BoardMesh({ preview }: { preview: BoardPreviewInput }) {
     [],
   );
   const frontMaterial = useMemo(
-    () =>
-      new MeshStandardMaterial({
+    () => {
+      const material = new MeshStandardMaterial({
         map: frontTexture,
         metalness: 0.12,
         roughness: 0.56,
         side: DoubleSide,
-      }),
+      });
+      configureBoardFaceMaterial(material);
+      return material;
+    },
     [frontTexture],
   );
   const backMaterial = useMemo(
-    () =>
-      new MeshStandardMaterial({
+    () => {
+      const material = new MeshStandardMaterial({
         map: backTexture,
         metalness: 0.12,
         roughness: 0.56,
         side: DoubleSide,
-      }),
+      });
+      configureBoardFaceMaterial(material);
+      return material;
+    },
     [backTexture],
   );
 
@@ -285,6 +291,16 @@ export function configureBoardTexture(
   texture.generateMipmaps = true;
   texture.anisotropy = Math.max(1, Math.min(8, maxAnisotropy));
   texture.needsUpdate = true;
+}
+
+export function configureBoardFaceMaterial(material: MeshStandardMaterial) {
+  // The textured faces sit immediately above the extruded body's end caps.
+  // Pull them toward the camera in depth-buffer space so grazing angles cannot
+  // alternate between the two coplanar surfaces (z-fighting).
+  material.polygonOffset = true;
+  material.polygonOffsetFactor = -2;
+  material.polygonOffsetUnits = -2;
+  material.needsUpdate = true;
 }
 
 function roundedRectangleShape(
