@@ -6,7 +6,10 @@ import {
   Eye,
   EyeOff,
   Focus,
-  Layers3,
+  Group,
+  ImageIcon,
+  PaintBucket,
+  Type,
   Link2,
   Lock,
   MoreHorizontal,
@@ -487,7 +490,7 @@ export function ProductionLayerTree({
                                 }
                                 type="button"
                               >
-                                <Layers3 className="size-3 shrink-0 text-muted-foreground" />
+                                <LayerKindIcon kind={layer.kind} />
                                 <span className="min-w-0 flex-1 truncate">
                                   {layer.name}
                                 </span>
@@ -680,6 +683,27 @@ function countMappingsBySource(mappings: ProductionMapping[]) {
     );
   }
   return counts;
+}
+
+function LayerKindIcon({ kind }: { kind: ContentLayer["kind"] }) {
+  const icon = {
+    image: { Icon: ImageIcon, label: "图片类型" },
+    text: { Icon: Type, label: "文字类型" },
+    group: { Icon: Group, label: "组合类型" },
+    boardFill: { Icon: PaintBucket, label: "基础铺铜类型" },
+  }[kind.type];
+  const Icon = icon.Icon;
+
+  return (
+    <span
+      aria-label={icon.label}
+      className="inline-flex shrink-0 text-muted-foreground"
+      role="img"
+      title={icon.label}
+    >
+      <Icon aria-hidden="true" className="size-3" />
+    </span>
+  );
 }
 
 function closeLayerActionMenus() {

@@ -85,6 +85,48 @@ describe("ProductionLayerTree", () => {
     expect(markup).toContain("同一源对象 source-1");
   });
 
+  it("uses distinct semantic icons for each source object kind", () => {
+    const kindLayers: ContentLayer[] = [
+      layer,
+      {
+        ...layer,
+        id: "image-1",
+        name: "图片",
+        kind: { type: "image", assetId: "asset-1", crop: null },
+      },
+      {
+        ...layer,
+        id: "group-1",
+        name: "组合",
+        kind: { type: "group" },
+      },
+      {
+        ...layer,
+        id: "fill-1",
+        name: "基础铺铜",
+        kind: { type: "boardFill", edgeClearanceUm: 200 },
+      },
+    ];
+    const kindMappings = kindLayers.map((source, index) => ({
+      id: `kind-mapping-${index}`,
+      sourceLayerId: source.id,
+      target: { side: "front" as const, layer: "copper" as const },
+      combine: "add" as const,
+    }));
+    const markup = renderToStaticMarkup(
+      <ProductionLayerTree
+        {...baseProps}
+        layers={{ front: kindLayers, back: [] }}
+        mappings={kindMappings}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="文字类型"');
+    expect(markup).toContain('aria-label="图片类型"');
+    expect(markup).toContain('aria-label="组合类型"');
+    expect(markup).toContain('aria-label="基础铺铜类型"');
+  });
+
   it("keeps production-layer expansion separate from the focused work layer", () => {
     const markup = renderToStaticMarkup(<ProductionLayerTree {...baseProps} />);
 
