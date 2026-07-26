@@ -1,9 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import {
+  LinearFilter,
+  LinearMipmapLinearFilter,
+  SRGBColorSpace,
+  Texture,
+} from "three";
 import { describe, expect, it } from "vitest";
 
 import {
   Board3DPreview,
   board3DPreviewRenderer,
+  configureBoardTexture,
 } from "@/features/preview/Board3DPreview";
 import type { BoardPreviewInput } from "@/features/preview/board-preview-renderer";
 
@@ -22,6 +29,19 @@ describe("Board3DPreview", () => {
   it("is available through the replaceable renderer interface", () => {
     expect(board3DPreviewRenderer.id).toBe("three-board-preview");
     expect(board3DPreviewRenderer.Component).toBe(Board3DPreview);
+  });
+
+  it("uses mipmaps and anisotropic sampling during oblique interaction", () => {
+    const texture = new Texture();
+
+    configureBoardTexture(texture, 16);
+
+    expect(texture.colorSpace).toBe(SRGBColorSpace);
+    expect(texture.magFilter).toBe(LinearFilter);
+    expect(texture.minFilter).toBe(LinearMipmapLinearFilter);
+    expect(texture.generateMipmaps).toBe(true);
+    expect(texture.anisotropy).toBe(8);
+    expect(texture.version).toBeGreaterThan(0);
   });
 });
 

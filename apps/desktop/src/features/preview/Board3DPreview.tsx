@@ -1,10 +1,11 @@
 import { OrbitControls } from "@react-three/drei";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useState } from "react";
 import {
   DoubleSide,
   ExtrudeGeometry,
   LinearFilter,
+  LinearMipmapLinearFilter,
   MeshStandardMaterial,
   Shape,
   ShapeGeometry,
@@ -246,6 +247,9 @@ function BoardMesh({ preview }: { preview: BoardPreviewInput }) {
 
 function useBoardTexture(texture: BoardPreviewTexture) {
   const [loadedTexture, setLoadedTexture] = useState<Texture | null>(null);
+  const maxAnisotropy = useThree((state) =>
+    state.gl.capabilities.getMaxAnisotropy(),
+  );
 
   useEffect(() => {
     let active = true;
@@ -256,12 +260,7 @@ function useBoardTexture(texture: BoardPreviewTexture) {
           result.dispose();
           return;
         }
-        result.colorSpace = SRGBColorSpace;
-        result.flipY = true;
-        result.magFilter = LinearFilter;
-        result.minFilter = LinearFilter;
-        result.generateMipmaps = false;
-        result.needsUpdate = true;
+        configureBoardTexture(result, maxAnisotropy);
         setLoadedTexture(result);
       },
     );
@@ -270,9 +269,22 @@ function useBoardTexture(texture: BoardPreviewTexture) {
       nextTexture.dispose();
       setLoadedTexture(null);
     };
-  }, [texture.pngDataUrl]);
+  }, [maxAnisotropy, texture.pngDataUrl]);
 
   return loadedTexture;
+}
+
+export function configureBoardTexture(
+  texture: Texture,
+  maxAnisotropy: number,
+) {
+  texture.colorSpace = SRGBColorSpace;
+  texture.flipY = true;
+  texture.magFilter = LinearFilter;
+  texture.minFilter = LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = Math.max(1, Math.min(8, maxAnisotropy));
+  texture.needsUpdate = true;
 }
 
 function roundedRectangleShape(
