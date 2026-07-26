@@ -22,6 +22,7 @@ import {
   type BoardPreviewRendererProps,
   type BoardPreviewTexture,
 } from "@/features/preview/board-preview-renderer";
+import { useTheme } from "@/features/theme/ThemeProvider";
 
 const FACE_OFFSET_MM = 0.01;
 
@@ -32,6 +33,7 @@ export function Board3DPreview({
   const errors = validateBoardPreviewInput(preview);
   const geometry = getBoardPreviewGeometry(preview);
   const longestSide = Math.max(geometry.widthMm, geometry.heightMm);
+  const { resolvedTheme } = useTheme();
 
   return (
     <div
@@ -69,8 +71,11 @@ export function Board3DPreview({
           dpr={[1, 2]}
           gl={{ alpha: true, antialias: true }}
         >
-          <color args={["#e9e6df"]} attach="background" />
-          <ambientLight intensity={1.5} />
+          <color
+            args={[resolvedTheme === "dark" ? "#151514" : "#e9e6df"]}
+            attach="background"
+          />
+          <ambientLight intensity={resolvedTheme === "dark" ? 1.15 : 1.5} />
           <directionalLight
             intensity={2.1}
             position={[
@@ -106,7 +111,10 @@ export function Board3DPreview({
         aria-hidden="true"
         style={{
           bottom: 12,
-          color: "rgba(31, 29, 25, 0.62)",
+          color:
+            resolvedTheme === "dark"
+              ? "rgba(238, 235, 226, 0.66)"
+              : "rgba(31, 29, 25, 0.62)",
           fontSize: 12,
           left: 0,
           pointerEvents: "none",

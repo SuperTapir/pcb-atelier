@@ -27,6 +27,8 @@ import { Button } from "@/components/ui/button";
 import { ExportEasyedaButton } from "@/features/export/ExportEasyedaButton";
 import type { BoardPreviewInput } from "@/features/preview/board-preview-renderer";
 import type { ProductionPreviewInput } from "@/features/preview/production-renderer";
+import { useTheme } from "@/features/theme/ThemeProvider";
+import type { ThemePreference } from "@/features/theme/theme-state";
 import {
   applyTransformPatch,
   isLayerTransformEditable,
@@ -117,6 +119,8 @@ export function WorkspaceShell({
   core,
   document: initialDocument,
 }: WorkspaceShellProps) {
+  const { preference: themePreference, setPreference: setThemePreference } =
+    useTheme();
   const [sessionDocument, setSessionDocument] =
     useState<WorkspaceDocument>(initialDocument);
   const [workspace, dispatch] = useReducer(
@@ -574,6 +578,21 @@ export function WorkspaceShell({
         </div>
 
         <div className="flex items-center justify-end gap-2 border-l px-3">
+          <select
+            aria-label="界面主题"
+            className="h-8 rounded-md border bg-background px-2 text-[11px] text-foreground"
+            onChange={(event) =>
+              setThemePreference(
+                event.currentTarget.value as ThemePreference,
+              )
+            }
+            title="界面主题"
+            value={themePreference}
+          >
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
           <ExportEasyedaButton onStatus={setStatus} />
         </div>
       </header>
