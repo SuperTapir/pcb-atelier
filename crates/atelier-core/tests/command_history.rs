@@ -347,6 +347,69 @@ fn visibility_reorder_and_mapping_are_reversible_domain_commands() {
 }
 
 #[test]
+fn reordering_a_group_moves_its_descendant_subtree_as_one_block() {
+    let mut document = AtelierDocument::new_card("组合排序", 64_000, 100_000);
+    let peer = text_layer("同级", 1_000);
+    let peer_id = peer.id;
+    let group = ContentLayer::new_group("组合");
+    let group_id = group.id;
+    let mut child = text_layer("子层", 2_000);
+    child.parent_id = Some(group_id);
+    let child_id = child.id;
+    document.front.layers.extend([peer, group, child]);
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::ReorderLayer {
+                layer_id: group_id,
+                new_parent_id: None,
+                new_index: 0,
+            },
+        )
+        .expect("move group subtree");
+
+    assert_eq!(
+        document
+            .front
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .collect::<Vec<_>>(),
+        vec![group_id, child_id, peer_id]
+    );
+    assert_eq!(document.front.layers[1].parent_id, Some(group_id));
+}
+
+#[test]
+fn reordering_rejects_moving_a_group_inside_its_descendant() {
+    let mut document = AtelierDocument::new_card("循环组合", 64_000, 100_000);
+    let group = ContentLayer::new_group("外层");
+    let group_id = group.id;
+    let mut child_group = ContentLayer::new_group("内层");
+    let child_group_id = child_group.id;
+    child_group.parent_id = Some(group_id);
+    document.front.layers.extend([group, child_group]);
+    let mut history = CommandHistory::default();
+
+    let error = history
+        .execute(
+            &mut document,
+            DocumentCommand::ReorderLayer {
+                layer_id: group_id,
+                new_parent_id: Some(child_group_id),
+                new_index: 0,
+            },
+        )
+        .expect_err("cycle must be rejected");
+
+    assert!(error.to_string().contains("cycle"));
+    assert_eq!(document.front.layers[0].id, group_id);
+    assert_eq!(document.front.layers[1].parent_id, Some(group_id));
+}
+
+#[test]
 fn deleting_group_removes_descendants_and_their_mappings() {
     let mut document = AtelierDocument::new_card("删除组", 64_000, 100_000);
     let group = ContentLayer::new_group("组");

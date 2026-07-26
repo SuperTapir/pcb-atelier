@@ -1,7 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { ProductionLayerTree } from "@/features/workspace/ProductionLayerTree";
+import {
+  ProductionLayerTree,
+  resolveLayerDrop,
+} from "@/features/workspace/ProductionLayerTree";
 import type { ContentLayer, ProductionMapping } from "@/lib/core";
 
 const layer: ContentLayer = {
@@ -104,4 +107,56 @@ describe("ProductionLayerTree", () => {
     expect(copperMarkup).toContain("添加基础铺铜");
     expect(silkMarkup).not.toContain("添加基础铺铜");
   });
+
+  it("resolves dropping a layer into a group as a parent change", () => {
+    const group = groupLayer("group", null);
+    const peer = textLayer("peer", null);
+
+    expect(resolveLayerDrop([group, peer], peer.id, group.id, "inside")).toEqual({
+      newParentId: group.id,
+      newIndex: 1,
+    });
+  });
+
+  it("resolves dropping a child beside a root layer as leaving its group", () => {
+    const group = groupLayer("group", null);
+    const child = textLayer("child", group.id);
+    const peer = textLayer("peer", null);
+
+    expect(resolveLayerDrop([group, child, peer], child.id, peer.id, "before"))
+      .toEqual({
+        newParentId: null,
+        newIndex: 2,
+      });
+  });
+
+  it("rejects dropping a group into one of its descendants", () => {
+    const group = groupLayer("group", null);
+    const childGroup = groupLayer("child-group", group.id);
+
+    expect(
+      resolveLayerDrop(
+        [group, childGroup],
+        group.id,
+        childGroup.id,
+        "inside",
+      ),
+    ).toBeNull();
+  });
 });
+
+function textLayer(id: string, parentId: string | null): ContentLayer {
+  return {
+    ...layer,
+    id,
+    name: id,
+    parentId,
+  };
+}
+
+function groupLayer(id: string, parentId: string | null): ContentLayer {
+  return {
+    ...textLayer(id, parentId),
+    kind: { type: "group" },
+  };
+}

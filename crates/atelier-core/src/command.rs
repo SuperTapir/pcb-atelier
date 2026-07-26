@@ -459,6 +459,8 @@ fn reorder_layer(
     let (side, old_index) =
         locate_layer(document, layer_id).ok_or(CommandError::LayerNotFound(layer_id))?;
     ensure_unlocked(&face(document, side).layers[old_index])?;
+    let mut moving_ids = descendant_ids(face(document, side), layer_id);
+    moving_ids.insert(layer_id);
     if let Some(parent_id) = new_parent_id {
         let (parent_side, parent_index) =
             locate_layer(document, parent_id).ok_or(CommandError::LayerNotFound(parent_id))?;
@@ -475,14 +477,32 @@ fn reorder_layer(
         ) {
             return Err(CommandError::NotAGroup(parent_id));
         }
+        if moving_ids.contains(&parent_id) {
+            return Err(CommandError::InvalidDocument(DocumentError::LayerCycle(
+                layer_id,
+            )));
+        }
     }
     let selected_face = face_mut(document, side);
-    let mut selected = selected_face.layers.remove(old_index);
-    selected.parent_id = new_parent_id;
-    if new_index > selected_face.layers.len() {
+    let mut moving = Vec::new();
+    let mut remaining = Vec::with_capacity(selected_face.layers.len() - moving_ids.len());
+    for layer in selected_face.layers.drain(..) {
+        if moving_ids.contains(&layer.id) {
+            moving.push(layer);
+        } else {
+            remaining.push(layer);
+        }
+    }
+    if new_index > remaining.len() {
         return Err(CommandError::InvalidLayerIndex(new_index));
     }
-    selected_face.layers.insert(new_index, selected);
+    moving
+        .iter_mut()
+        .find(|layer| layer.id == layer_id)
+        .expect("selected layer must be included in its moving subtree")
+        .parent_id = new_parent_id;
+    remaining.splice(new_index..new_index, moving);
+    selected_face.layers = remaining;
     Ok(())
 }
 

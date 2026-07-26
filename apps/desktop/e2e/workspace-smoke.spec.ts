@@ -420,6 +420,47 @@ test("Web 左树多选可以通过共享服务完成分组与解组", async ({ p
   await expect(back.getByText("背面说明", { exact: true })).toBeVisible();
 });
 
+test("左树拖拽支持进入组合、组内排序与拖出组合", async ({ page }) => {
+  await page.getByTestId("production-context-back-silkscreen").click();
+  const tree = page.getByRole("tree", { name: "板体与生产层" });
+  const back = tree.getByRole("group", { name: "背面" });
+  const mark = back.getByRole("treeitem").filter({ hasText: "背面标记" });
+  const note = back.getByRole("treeitem").filter({ hasText: "背面说明" });
+
+  await mark.getByRole("button", { name: "背面标记", exact: true }).click();
+  await note
+    .getByRole("button", { name: "背面说明", exact: true })
+    .click({ modifiers: ["Shift"] });
+  await page.getByRole("button", { name: "分组", exact: true }).click();
+  const group = back.getByRole("treeitem").filter({ hasText: "组合" });
+
+  await page.getByRole("button", { name: "文字工具 (T)" }).click();
+  await clickCanvas(page.getByTestId("workspace-canvas-back"));
+  const editor = page.getByTestId("text-editor");
+  await editor.fill("待拖拽");
+  await editor.press("Escape");
+  await page.getByRole("button", { name: "选择工具 (V)" }).click();
+
+  const added = back.getByRole("treeitem").filter({ hasText: "文字" });
+  await expect(added).toHaveCSS("padding-left", "2px");
+
+  await added.dragTo(group);
+  await expect(page.getByRole("status")).toContainText("图层层级与顺序已更新");
+  await expect(added).toHaveCSS("padding-left", "16px");
+
+  await added.dragTo(mark, { targetPosition: { x: 8, y: 2 } });
+  await expect
+    .poll(async () => {
+      const labels = await back.getByRole("treeitem").allTextContents();
+      return labels.findIndex((label) => label.includes("文字")) <
+        labels.findIndex((label) => label.includes("背面标记"));
+    })
+    .toBe(true);
+
+  await added.dragTo(group, { targetPosition: { x: 8, y: 26 } });
+  await expect(added).toHaveCSS("padding-left", "2px");
+});
+
 test("铜层工作上下文可以创建带板边间距的基础铺铜", async ({ page }) => {
   await page.getByTestId("production-context-front-copper").click();
   const tree = page.getByRole("tree", { name: "板体与生产层" });

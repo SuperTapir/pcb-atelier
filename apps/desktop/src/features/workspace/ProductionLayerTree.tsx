@@ -51,8 +51,8 @@ interface ProductionLayerTreeProps {
   onReorder?: (
     face: CardFace,
     layerId: string,
-    targetLayerId: string,
-    placement: "before" | "after",
+    newParentId: string | null,
+    newIndex: number,
   ) => void;
   onRename?: (layer: ContentLayer, name: string) => void;
   onRemoveMapping?: (mappingId: string) => void;
@@ -71,6 +71,8 @@ interface ProductionLayerTreeProps {
     context: WorkContext,
   ) => void;
 }
+
+type LayerDropPlacement = "before" | "inside" | "after" | "rootEnd";
 
 const PRODUCTION_NODES: Array<{
   context: WorkContext;
@@ -130,11 +132,10 @@ export function ProductionLayerTree({
     face: CardFace;
     context: WorkContext;
     layerId: string;
-    parentId: string | null;
   } | null>(null);
   const [dropTarget, setDropTarget] = useState<{
-    layerId: string;
-    placement: "before" | "after";
+    layerId: string | null;
+    placement: LayerDropPlacement;
   } | null>(null);
   const [expanded, setExpanded] = useState<
     Record<CardFace, Set<WorkContext>>
@@ -340,6 +341,9 @@ export function ProductionLayerTree({
                               dropTarget?.layerId === layer.id &&
                                 dropTarget.placement === "after" &&
                                 "after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-primary",
+                              dropTarget?.layerId === layer.id &&
+                                dropTarget.placement === "inside" &&
+                                "bg-primary/10 ring-1 ring-inset ring-primary/70",
                             )}
                             draggable={!layer.locked}
                             key={`${node.context}-${layer.id}`}
@@ -358,26 +362,31 @@ export function ProductionLayerTree({
                               setDropTarget(null);
                             }}
                             onDragOver={(event) => {
+                              const placement = layerDropPlacement(
+                                event,
+                                layer,
+                              );
                               if (
-                                !canDropLayer(
+                                !canDragInProductionLayer(
                                   dragging,
                                   face.id,
                                   node.context,
-                                  layer,
+                                ) ||
+                                !resolveLayerDrop(
+                                  layers[face.id],
+                                  dragging!.layerId,
+                                  layer.id,
+                                  placement,
                                 )
                               ) {
                                 return;
                               }
                               event.preventDefault();
+                              event.stopPropagation();
                               event.dataTransfer.dropEffect = "move";
-                              const bounds =
-                                event.currentTarget.getBoundingClientRect();
                               setDropTarget({
                                 layerId: layer.id,
-                                placement:
-                                  event.clientY < bounds.top + bounds.height / 2
-                                    ? "before"
-                                    : "after",
+                                placement,
                               });
                             }}
                             onDragStart={(event) => {
@@ -390,34 +399,47 @@ export function ProductionLayerTree({
                                 face: face.id,
                                 context: node.context,
                                 layerId: layer.id,
-                                parentId: layer.parentId,
                               });
                             }}
                             onDrop={(event) => {
+                              const intent =
+                                dropTarget &&
+                                dragging &&
+                                dropTarget.layerId === layer.id
+                                  ? resolveLayerDrop(
+                                      layers[face.id],
+                                      dragging.layerId,
+                                      layer.id,
+                                      dropTarget.placement,
+                                    )
+                                  : null;
                               if (
-                                !dropTarget ||
-                                !dragging ||
-                                !canDropLayer(
+                                !intent ||
+                                !canDragInProductionLayer(
                                   dragging,
                                   face.id,
                                   node.context,
-                                  layer,
                                 )
                               ) {
                                 return;
                               }
                               event.preventDefault();
+                              event.stopPropagation();
                               onReorder?.(
                                 face.id,
-                                dragging.layerId,
-                                layer.id,
-                                dropTarget.placement,
+                                dragging!.layerId,
+                                intent.newParentId,
+                                intent.newIndex,
                               );
                               setDragging(null);
                               setDropTarget(null);
                             }}
                             role="treeitem"
-                            style={{ paddingLeft: layer.parentId ? 14 : 2 }}
+                            style={{
+                              paddingLeft:
+                                2 +
+                                layerDepth(layers[face.id], layer.id) * 14,
+                            }}
                           >
                             {renamingLayerId === layer.id ? (
                               <input
@@ -519,6 +541,59 @@ export function ProductionLayerTree({
                         ))
                       )}
 
+                      {dragging &&
+                        canDragInProductionLayer(
+                          dragging,
+                          face.id,
+                          node.context,
+                        ) && (
+                          <div
+                            className={cn(
+                              "mx-1 flex h-6 items-center justify-center rounded border border-dashed text-[9px] text-muted-foreground",
+                              dropTarget?.layerId === null &&
+                                "border-primary bg-primary/10 text-primary",
+                            )}
+                            data-testid={`production-root-drop-${face.id}-${node.context}`}
+                            onDragOver={(event) => {
+                              const intent = resolveLayerDrop(
+                                layers[face.id],
+                                dragging.layerId,
+                                null,
+                                "rootEnd",
+                              );
+                              if (!intent) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              event.dataTransfer.dropEffect = "move";
+                              setDropTarget({
+                                layerId: null,
+                                placement: "rootEnd",
+                              });
+                            }}
+                            onDrop={(event) => {
+                              const intent = resolveLayerDrop(
+                                layers[face.id],
+                                dragging.layerId,
+                                null,
+                                "rootEnd",
+                              );
+                              if (!intent) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              onReorder?.(
+                                face.id,
+                                dragging.layerId,
+                                intent.newParentId,
+                                intent.newIndex,
+                              );
+                              setDragging(null);
+                              setDropTarget(null);
+                            }}
+                          >
+                            移至当前生产层顶层
+                          </div>
+                        )}
+
                       {node.context === "copper" && (
                         <button
                           aria-label="添加基础铺铜"
@@ -615,24 +690,112 @@ function closeLayerActionMenus() {
     .forEach((details) => details.removeAttribute("open"));
 }
 
-function canDropLayer(
+function canDragInProductionLayer(
   dragging: {
     face: CardFace;
     context: WorkContext;
     layerId: string;
-    parentId: string | null;
   } | null,
   face: CardFace,
   context: WorkContext,
-  target: ContentLayer,
 ) {
   return Boolean(
     dragging &&
       dragging.face === face &&
-      dragging.context === context &&
-      dragging.layerId !== target.id &&
-      dragging.parentId === target.parentId,
+      dragging.context === context,
   );
+}
+
+function layerDropPlacement(
+  event: DragEvent<HTMLDivElement>,
+  target: ContentLayer,
+): LayerDropPlacement {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const ratio =
+    bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0.5;
+  if (target.kind.type === "group") {
+    if (ratio < 0.3) return "before";
+    if (ratio > 0.7) return "after";
+    return "inside";
+  }
+  return ratio < 0.5 ? "before" : "after";
+}
+
+export function resolveLayerDrop(
+  layers: ContentLayer[],
+  sourceLayerId: string,
+  targetLayerId: string | null,
+  placement: LayerDropPlacement,
+): { newParentId: string | null; newIndex: number } | null {
+  const source = layers.find((layer) => layer.id === sourceLayerId);
+  if (!source) return null;
+  const movingIds = layerSubtreeIds(layers, sourceLayerId);
+  if (targetLayerId && movingIds.has(targetLayerId)) return null;
+
+  const remaining = layers.filter((layer) => !movingIds.has(layer.id));
+  if (placement === "rootEnd") {
+    return { newParentId: null, newIndex: 0 };
+  }
+
+  const target = remaining.find((layer) => layer.id === targetLayerId);
+  if (!target) return null;
+  if (placement === "inside" && target.kind.type !== "group") return null;
+
+  if (placement === "inside") {
+    return {
+      newParentId: target.id,
+      newIndex: subtreeEndIndex(remaining, target.id),
+    };
+  }
+
+  return {
+    newParentId: target.parentId,
+    newIndex:
+      placement === "before"
+        ? subtreeEndIndex(remaining, target.id)
+        : remaining.findIndex((layer) => layer.id === target.id),
+  };
+}
+
+function subtreeEndIndex(layers: ContentLayer[], rootId: string) {
+  const ids = layerSubtreeIds(layers, rootId);
+  let end = 0;
+  for (const [index, layer] of layers.entries()) {
+    if (ids.has(layer.id)) end = Math.max(end, index + 1);
+  }
+  return end;
+}
+
+function layerSubtreeIds(layers: ContentLayer[], rootId: string) {
+  const ids = new Set([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const layer of layers) {
+      if (
+        layer.parentId &&
+        ids.has(layer.parentId) &&
+        !ids.has(layer.id)
+      ) {
+        ids.add(layer.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}
+
+function layerDepth(layers: ContentLayer[], layerId: string) {
+  const byId = new Map(layers.map((layer) => [layer.id, layer]));
+  let depth = 0;
+  let parentId = byId.get(layerId)?.parentId ?? null;
+  const seen = new Set<string>();
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    depth += 1;
+    parentId = byId.get(parentId)?.parentId ?? null;
+  }
+  return depth;
 }
 
 function LayerActionsMenu({

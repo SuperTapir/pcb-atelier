@@ -851,41 +851,13 @@ export function WorkspaceShell({
                 onReorder={(
                   face,
                   layerId,
-                  targetLayerId,
-                  placement,
+                  newParentId,
+                  newIndex,
                 ) => {
-                  const layers =
-                    face === "front"
-                      ? sessionDocument.frontLayers
-                      : sessionDocument.backLayers;
-                  const sourceIndex = layers.findIndex(
-                    (layer) => layer.id === layerId,
+                  void applyDocumentMutation(
+                    () => reorderLayer(layerId, newParentId, newIndex),
+                    "图层层级与顺序已更新",
                   );
-                  const targetIndex = layers.findIndex(
-                    (layer) => layer.id === targetLayerId,
-                  );
-                  const source = layers[sourceIndex];
-                  if (
-                    sourceIndex < 0 ||
-                    targetIndex < 0 ||
-                    !source
-                  ) {
-                    return;
-                  }
-                  let nextIndex =
-                    targetIndex + (placement === "after" ? 1 : 0);
-                  if (sourceIndex < nextIndex) nextIndex -= 1;
-                  if (sourceIndex !== nextIndex) {
-                    void applyDocumentMutation(
-                      () =>
-                        reorderLayer(
-                          layerId,
-                          source.parentId,
-                          nextIndex,
-                        ),
-                      "图层顺序已更新",
-                    );
-                  }
                 }}
                 onRemoveMapping={(mappingId) =>
                   void applyDocumentMutation(
