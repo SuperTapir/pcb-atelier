@@ -39,3 +39,4 @@
 - [x] 5.5 运行 Rust workspace、前端单测、typecheck、production build、完整 Playwright、Tauri benchmark、OpenSpec strict 和 `git diff --check`
 - [x] 5.6 删除旧的完整字节重复预览接口与兼容回退，记录 PNG 编码/base64/客户端解码占比及首轮传输决策，更新性能基线和架构文档，确认当前未发布 schema 不保留迁移分支
 - [x] 5.7 根据 24 FPS 真实录屏复现缩放提交后 3–9 秒代理空窗：平滑改为等价线性时间滑动窗口并支持操作内行块取消，代理刷新期间保留上一张可绘制纹理；增加 20 次尺寸/重平滑 burst 回归并完成全量验证
+- [x] 5.8 增加真实 Konva Transformer 缩放 E2E：拖动期间零画布代理编译，扣住新代理响应时逐帧检查旧纹理按新几何持续可绘制，并注入代理失败验证不退化为空白或占位矩形；将尺寸 burst 校准为 UI 可达的 1 mm 平滑与 25 µm 高倍率代理组合

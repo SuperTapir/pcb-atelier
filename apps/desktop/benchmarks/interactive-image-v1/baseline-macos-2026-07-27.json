@@ -10,23 +10,25 @@
     "heightPx": 320
   },
   "samples": 30,
-  "bridgeP95Ms": 3.93,
-  "drawableP50Ms": 4.86,
-  "drawableP95Ms": 6.95,
-  "inputDispatchP95Ms": 0.14,
+  "bridgeP95Ms": 4.42,
+  "drawableP50Ms": 4.75,
+  "drawableP95Ms": 9.59,
+  "inputDispatchP95Ms": 0.1,
   "burstGenerations": 60,
   "cancelledBurstRequests": 59,
   "finalGenerationAccepted": true,
   "resizeBurstGenerations": 20,
-  "resizeBurstSmoothingRadiusUm": 8000,
-  "resizeBurstLatestMs": 10.98,
+  "resizeBurstSmoothingRadiusUm": 1000,
+  "resizeBurstPixelPitchUm": 25,
+  "resizeBurstLatestMs": 21.8,
   "cancelledResizeRequests": 19,
   "resizeOutput": {
-    "widthPx": 488,
-    "heightPx": 772
+    "widthPx": 808,
+    "heightPx": 1292
   },
   "diagnostics": {
     "sourceBytes": 136309,
+    "activeSessions": 1,
     "prepareCount": 1,
     "proxyCompileCount": 33,
     "cancelCount": 85,
@@ -38,6 +40,6 @@
   "encodingDecision": {
     "transport": "PNG data URL",
     "reason": "source registration removes the dominant repeated JSON/decode cost; binary transport remains deferred until browser texture-decode profiling shows PNG encode, base64 and client decode exceed 20% of the 120 ms budget",
-    "measuredBreakdown": "bridge compile, PNG encode, base64, HTTP and response parse are 3.87 ms p95; the same 30 samples reach headless Chrome createImageBitmap completion at 6.26 ms p95"
+    "measuredBreakdown": "bridge compile, PNG encode, base64, HTTP and response parse are 4.42 ms p95; the same 30 samples reach headless Chrome createImageBitmap completion at 9.59 ms p95"
   }
 }

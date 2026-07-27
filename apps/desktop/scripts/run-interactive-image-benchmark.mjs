@@ -106,11 +106,11 @@ try {
         workspaceRevision: source.workspaceRevision,
         recipe: {
           ...baseRecipe,
-          smoothingRadiusUm: 8_000,
+          smoothingRadiusUm: 1_000,
         },
-        physicalWidthUm: 160_000 - index * 2_000,
-        physicalHeightUm: 250_000 - index * 3_000,
-        pixelPitchUm: 250,
+        physicalWidthUm: 24_000 - index * 200,
+        physicalHeightUm: 38_000 - index * 300,
+        pixelPitchUm: 25,
       }),
     ),
   );
@@ -150,6 +150,8 @@ try {
     resizeBurstLatestMs: Number(resizeBurstLatestMs.toFixed(2)),
     cancelledResizeRequests: resizeBurstResults.filter((entry) => entry.error)
       .length,
+    resizeBurstSmoothingRadiusUm: 1_000,
+    resizeBurstPixelPitchUm: 25,
     resizeOutput: {
       widthPx: finalResize.payload.widthPx,
       heightPx: finalResize.payload.heightPx,
@@ -208,7 +210,8 @@ async function waitForHealth() {
 function percentile(values, ratio) {
   const sorted = [...values].sort((left, right) => left - right);
   return Number(
-    sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)]
-      .toFixed(2),
+    sorted[
+      Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1)
+    ].toFixed(2),
   );
 }

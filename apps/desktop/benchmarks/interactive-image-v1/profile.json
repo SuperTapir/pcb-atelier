@@ -25,7 +25,12 @@
   "previewSamples": 30,
   "burstGenerations": 60,
   "resizeBurstGenerations": 20,
-  "resizeBurstSmoothingRadiusUm": 8000,
+  "resizeBurstSmoothingRadiusUm": 1000,
+  "resizeBurstPixelPitchUm": 25,
+  "resizeBurstPhysicalSizeUm": {
+    "first": { "width": 24000, "height": 38000 },
+    "last": { "width": 20200, "height": 32300 }
+  },
   "dragFrameSamples": 300,
   "timingBoundary": "input dispatch to matching generation PNG response and headless Chrome createImageBitmap completion",
   "targetsMs": {
