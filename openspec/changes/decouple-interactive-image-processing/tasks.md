@@ -32,9 +32,9 @@
 
 ## 5. 交互与生产一致性验证
 
-- [ ] 5.1 增加浏览器 E2E，覆盖完整原图/结果实时对照、快速滑动不闪白、导入取消无副作用、常驻检查器每手势单次撤销、显式重新 Otsu 固化手动值以及临时查看原图不改生产结果
-- [ ] 5.2 增加 Tauri 发布构建手势回归：后台重形态学任务运行时拖动图片，验证只变换现有纹理、零同步 IPC、零图片编译和 16.7 ms p95 帧目标
+- [x] 5.1 增加浏览器 E2E，覆盖完整原图/结果实时对照、快速滑动不闪白、导入取消无副作用、常驻检查器每手势单次撤销、显式重新 Otsu 固化手动值以及临时查看原图不改生产结果
+- [x] 5.2 增加 Tauri 发布构建手势回归：后台重形态学任务运行时拖动图片，验证只变换现有纹理、零同步 IPC、零图片编译和 16.7 ms p95 帧目标
 - [x] 5.3 按 `interactive-image-v1` 增加真实图片连续 60 次输入和至少 30 个非缓存阈值/反相结果基准，验证注册后请求不含源图、最终 generation 正确、输入处理低于 16.7 ms p95 且纹理可绘制反馈达到 120 ms p95 基准目标
-- [ ] 5.4 用非对称、孔洞、孤岛、细线和裁切 fixture 比较交互代理、正式 mask、3D 与 EasyEDA 输出；验证可表达结构的指纹、方向、极性、拓扑和边界误差，细于两个代理像素的结构只影响粗代理可见性，并断言 draft 不进入 3D、同 revision 的 2D/3D 只解析一次且哈希相同
-- [ ] 5.5 运行 Rust workspace、前端单测、typecheck、production build、完整 Playwright、Tauri benchmark、OpenSpec strict 和 `git diff --check`
+- [x] 5.4 用非对称、孔洞、孤岛、细线和裁切 fixture 比较交互代理、正式 mask、3D 与 EasyEDA 输出；验证可表达结构的指纹、方向、极性、拓扑和边界误差，细于两个代理像素的结构只影响粗代理可见性，并断言 draft 不进入 3D、同 revision 的 2D/3D 只解析一次且哈希相同
+- [x] 5.5 运行 Rust workspace、前端单测、typecheck、production build、完整 Playwright、Tauri benchmark、OpenSpec strict 和 `git diff --check`
 - [x] 5.6 删除旧的完整字节重复预览接口与兼容回退，记录 PNG 编码/base64/客户端解码占比及首轮传输决策，更新性能基线和架构文档，确认当前未发布 schema 不保留迁移分支
