@@ -9,6 +9,7 @@ import {
   getMarqueeLayerIds,
   getAdaptiveProxyPixelPitchUm,
   getInteractiveProxyCacheKey,
+  getContentLayerFill,
   getTranslatedSelectionTransforms,
   isVisibleInProductionContext,
   mergeAvailableProxyImages,
@@ -336,5 +337,40 @@ describe("production-layer visibility in the edit canvas", () => {
         silkscreen: false,
       }),
     ).toBe(true);
+  });
+});
+
+describe("production-aware text appearance", () => {
+  const text = { id: "text-1" } as ContentLayer;
+  const palette = {
+    exposedCopper: "#c58d37",
+    solderMask: "#123456",
+    silkscreen: "#f6f1dd",
+    substrate: "#d4b07a",
+  };
+
+  it("uses the physical silkscreen color for a mapped text layer", () => {
+    expect(
+      getContentLayerFill(
+        text,
+        [
+          {
+            id: "mapping-1",
+            sourceLayerId: text.id,
+            target: { side: "back", layer: "silkscreen" },
+            combine: "add",
+          },
+        ],
+        "back",
+        "silkscreen",
+        palette,
+      ),
+    ).toBe(palette.silkscreen);
+  });
+
+  it("keeps the neutral editor color for an unmapped text layer", () => {
+    expect(
+      getContentLayerFill(text, [], "front", "silkscreen", palette),
+    ).toBe("#2b2924");
   });
 });

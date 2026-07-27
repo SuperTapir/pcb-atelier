@@ -117,14 +117,14 @@ fn assert_golden_baseline(trace: &Value) {
             {
                 "target": { "side": "front", "layer": "copper" },
                 "polarity": "positive",
-                "compositeSha256": "ace0a46b8272fa496d03059265d0351421799d429a49d3693867cc31dbc89d93",
+                "compositeSha256": "f6f5fe24c3658ee454082becb53b25812de6f25cbddc9740ab326c3513be0c6d",
                 "boundsUm": { "minXUm": 13200, "minYUm": 31000, "maxXUm": 21000, "maxYUm": 42000 },
                 "topology": { "islandCount": 1, "holeCount": 0 }
             },
             {
                 "target": { "side": "front", "layer": "solderMaskOpen" },
                 "polarity": "opening",
-                "compositeSha256": "ace0a46b8272fa496d03059265d0351421799d429a49d3693867cc31dbc89d93",
+                "compositeSha256": "f6f5fe24c3658ee454082becb53b25812de6f25cbddc9740ab326c3513be0c6d",
                 "boundsUm": { "minXUm": 13200, "minYUm": 31000, "maxXUm": 21000, "maxYUm": 42000 },
                 "topology": { "islandCount": 1, "holeCount": 0 }
             },
@@ -138,14 +138,14 @@ fn assert_golden_baseline(trace: &Value) {
             {
                 "target": { "side": "back", "layer": "copper" },
                 "polarity": "positive",
-                "compositeSha256": "bde45a4ea7ce9d9b45c9327c2db141ef924347e613f1063c5127e239b7f16f0f",
+                "compositeSha256": "c08ed4debd9e27e2941264734cf5e91fa061de67145580586b213f7672c65f74",
                 "boundsUm": { "minXUm": 33200, "minYUm": 38000, "maxXUm": 55000, "maxYUm": 85000 },
                 "topology": { "islandCount": 2, "holeCount": 0 }
             },
             {
                 "target": { "side": "back", "layer": "solderMaskOpen" },
                 "polarity": "opening",
-                "compositeSha256": "bde45a4ea7ce9d9b45c9327c2db141ef924347e613f1063c5127e239b7f16f0f",
+                "compositeSha256": "c08ed4debd9e27e2941264734cf5e91fa061de67145580586b213f7672c65f74",
                 "boundsUm": { "minXUm": 33200, "minYUm": 38000, "maxXUm": 55000, "maxYUm": 85000 },
                 "topology": { "islandCount": 2, "holeCount": 0 }
             },

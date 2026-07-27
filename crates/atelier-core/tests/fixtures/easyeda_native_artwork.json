@@ -1,0 +1,36 @@
+{
+  "source": "EasyEDA Pro baseline fixture reduced from PCB-Card-EXAMPLE-001-baseline.epro2",
+  "image": {
+    "front": {
+      "layerId": 3,
+      "startX": 10.0,
+      "startY": 3955.0,
+      "width": 2515.0,
+      "height": 3940.0,
+      "mirror": false
+    },
+    "back": {
+      "layerId": 6,
+      "startX": 2525.0,
+      "startY": 3945.0,
+      "width": 2515.0,
+      "height": 3940.0,
+      "mirror": false
+    },
+    "sharedLocalPath": [-130.0017, 1437.417, "L", -133.0017, 1437.001]
+  },
+  "string": {
+    "layerId": 4,
+    "x": 2405.0,
+    "y": 3740.0,
+    "text": "Kamome",
+    "fontFamily": "default",
+    "fontSize": 120.0,
+    "origin": "LEFT_BOTTOM",
+    "reverse": false,
+    "mirror": false,
+    "zIndex": -1,
+    "specialColor": "#cc0066",
+    "firstTicketRequired": true
+  }
+}

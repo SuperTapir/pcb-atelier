@@ -58,6 +58,8 @@ pub struct EasyedaNativeValidation {
     pub board_width_um: u32,
     pub board_height_um: u32,
     pub fill_count: usize,
+    pub image_count: usize,
+    pub string_count: usize,
     pub hole_count: usize,
     pub filled_layer_ids: Vec<u32>,
     /// Layer IDs 5 and 6 represent solder-mask *openings*, never a mask fill.
@@ -237,6 +239,8 @@ fn validate_easyeda_native_project_with_identity(
         board_width_um: 0,
         board_height_um: 0,
         fill_count: 0,
+        image_count: 0,
+        string_count: 0,
         hole_count: 0,
         filled_layer_ids: Vec::new(),
         solder_mask_opening_layer_ids: Vec::new(),
@@ -568,12 +572,26 @@ fn inspect_static_artwork(
     for line in epru.lines().filter(|line| !line.trim().is_empty()) {
         let (head, data) = parse_record(line)?;
         match head["type"].as_str() {
-            Some("FILL") => {
-                validation.fill_count += 1;
+            Some(kind @ ("FILL" | "IMAGE" | "STRING")) => {
+                match kind {
+                    "FILL" => validation.fill_count += 1,
+                    "IMAGE" => validation.image_count += 1,
+                    "STRING" => {
+                        validation.string_count += 1;
+                        let first_ticket = head["firstTicket"].as_u64().unwrap_or_default();
+                        let current_ticket = head["ticket"].as_u64().unwrap_or_default();
+                        if first_ticket == 0 || first_ticket >= current_ticket {
+                            validation
+                                .errors
+                                .push("native STRING has no valid firstTicket".to_owned());
+                        }
+                    }
+                    _ => unreachable!(),
+                }
                 let Some(layer_id) = data["layerId"].as_u64().map(|value| value as u32) else {
                     validation
                         .errors
-                        .push("native FILL has no layerId".to_owned());
+                        .push(format!("native {kind} has no layerId"));
                     continue;
                 };
                 if !validation.filled_layer_ids.contains(&layer_id) {

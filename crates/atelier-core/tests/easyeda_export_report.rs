@@ -36,7 +36,7 @@ fn handoff_writes_a_versioned_traceable_manifest_after_two_validated_outputs() {
     let second = export_easyeda_handoff(directory.path(), &fixture.bundle, &board)
         .expect("re-export as a new downstream version");
 
-    assert_eq!(first.export_format_version, "atelier-easyeda-handoff-v3");
+    assert_eq!(first.export_format_version, "atelier-easyeda-handoff-v4");
     assert_eq!(first.production_source, SamplingPurpose::FormalProduction);
     assert_eq!(first.fabrication_input_sha256, board.build.input_sha256);
     assert_eq!(first.fabrication_output_sha256, board.build.output_sha256);
@@ -99,6 +99,9 @@ fn handoff_writes_a_versioned_traceable_manifest_after_two_validated_outputs() {
     assert!(manifest.contains("assetSha256"));
     assert!(manifest.contains("manufacturing"));
     assert!(manifest.contains("directOrderSupported"));
+    assert!(manifest.contains("layerStrategies"));
+    assert!(manifest.contains("nativeImage"));
+    assert!(manifest.contains("nativeString"));
 }
 
 #[test]

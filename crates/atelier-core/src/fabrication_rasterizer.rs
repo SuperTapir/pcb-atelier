@@ -21,7 +21,7 @@ use crate::{
 };
 
 pub const ALPHA_THRESHOLD: u8 = 128;
-const RASTERIZER_VERSION: &str = "atelier-bundle-rasterizer-v2";
+const RASTERIZER_VERSION: &str = "atelier-bundle-rasterizer-v3";
 const NOTO_SANS_CJK_SC: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSC-Regular.otf");
 static SYSTEM_FONT_DATABASE: OnceLock<Database> = OnceLock::new();
 

@@ -38,6 +38,47 @@ fn project_archive_round_trip_preserves_document_and_embedded_asset() {
 }
 
 #[test]
+fn save_overwrite_and_save_as_reopen_the_same_complete_project() {
+    let mut bundle = ProjectBundle::new(AtelierDocument::new_card("保存闭环", 64_000, 100_000));
+    let text = ContentLayer::new_text(
+        "背面文字",
+        "Kamome",
+        TransformUm::rect(22, 22, 20_000, 6_000),
+    );
+    let text_id = text.id;
+    bundle.document.back.layers.push(text);
+    bundle.document.mappings.push(ProductionMapping::new(
+        text_id,
+        ProductionTarget::new(CardSide::Back, FaceProductionLayer::Silkscreen),
+        CombineMode::Add,
+    ));
+    let temp = tempfile::tempdir().expect("temporary project directory");
+    let original_path = temp.path().join("original.pcba");
+    let save_as_path = temp.path().join("copy.pcba");
+
+    bundle.save(&original_path).expect("first save");
+    bundle.document.title = "保存闭环（已修改）".to_owned();
+    bundle.save(&original_path).expect("overwrite save");
+    let overwritten = ProjectBundle::open(&original_path).expect("open overwritten project");
+    assert_eq!(overwritten.document.title, "保存闭环（已修改）");
+    assert_eq!(
+        overwritten.document.back.layers[0].kind,
+        bundle.document.back.layers[0].kind
+    );
+
+    bundle.save(&save_as_path).expect("save as");
+    let copied = ProjectBundle::open(&save_as_path).expect("open save-as project");
+    assert_eq!(copied, bundle);
+    assert_eq!(
+        ProjectBundle::open(&original_path)
+            .expect("original remains valid")
+            .document
+            .title,
+        "保存闭环（已修改）"
+    );
+}
+
+#[test]
 fn archive_round_trip_preserves_asset_treatment_instance_mapping_and_manufacturer() {
     let mut encoded = Cursor::new(Vec::new());
     DynamicImage::new_rgba8(4, 3)

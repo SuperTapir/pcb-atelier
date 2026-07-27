@@ -1,8 +1,8 @@
 //! Public JLCEDA Professional V3 archive (`.epro2`) foundation.
 //!
-//! This module consumes only `ResolvedFabricationBoard`: its fixed-grid masks,
-//! physical board frame and mechanical features. It never reads source assets,
-//! content layers, text, recipes, or preview pixels.
+//! Manufacturing geometry always comes from `ResolvedFabricationBoard`. The
+//! document-aware entry point may additionally preserve editable IMAGE/STRING
+//! metadata when one resolved operation maps losslessly to one source layer.
 //!
 //! The archive layout and line-delimited `DOCHEAD`/`META` protocol were
 //! derived from the MIT-licensed PCB_lightgraph Neo implementation at
@@ -22,12 +22,13 @@ use thiserror::Error;
 use zip::write::SimpleFileOptions;
 
 use crate::{
-    BoardOutline, BoardToEasyedaTransform, MechanicalFeature, ProductionTarget,
-    ResolvedFabricationBoard, SamplingPurpose, atomic_write_validated, easyeda_paths,
+    AtelierDocument, BoardOutline, BoardToEasyedaTransform, CardSide, CombineMode, ContentKind,
+    ContentLayer, MechanicalFeature, ProductionTarget, ResolvedFabricationBoard,
+    ResolvedFabricationLayer, SamplingPurpose, atomic_write_validated, easyeda_paths,
     polygonize_mask,
 };
 
-const FORMAT: &str = "atelier-easyeda-public-v1";
+const FORMAT: &str = "atelier-easyeda-public-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +38,28 @@ pub struct PublicArchiveExport {
     pub board_uuid: String,
     pub pcb_uuid: String,
     pub fill_count: usize,
+    pub image_count: usize,
+    pub string_count: usize,
     pub hole_count: usize,
+    pub layer_strategies: Vec<EasyedaLayerStrategy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EasyedaLayerStrategy {
+    pub target: ProductionTarget,
+    pub layer_id: u32,
+    pub strategy: EasyedaArtworkStrategy,
+    pub fallback_reason: Option<String>,
+    pub exact_contour_fallbacks: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EasyedaArtworkStrategy {
+    NativeImage,
+    NativeString,
+    AggregatedFill,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +73,8 @@ pub struct PublicArchiveValidation {
     pub board_width_um: u32,
     pub board_height_um: u32,
     pub fill_count: usize,
+    pub image_count: usize,
+    pub string_count: usize,
     pub hole_count: usize,
     pub filled_layer_ids: Vec<u32>,
 }
@@ -89,6 +113,24 @@ pub fn export_public_archive(
     title: &str,
     board: &ResolvedFabricationBoard,
 ) -> Result<PublicArchiveExport, EasyedaPublicError> {
+    export_public_archive_internal(destination, title, None, board)
+}
+
+pub fn export_public_archive_with_document(
+    destination: &Path,
+    title: &str,
+    document: &AtelierDocument,
+    board: &ResolvedFabricationBoard,
+) -> Result<PublicArchiveExport, EasyedaPublicError> {
+    export_public_archive_internal(destination, title, Some(document), board)
+}
+
+fn export_public_archive_internal(
+    destination: &Path,
+    title: &str,
+    document: Option<&AtelierDocument>,
+    board: &ResolvedFabricationBoard,
+) -> Result<PublicArchiveExport, EasyedaPublicError> {
     let title = title.trim();
     if title.is_empty() {
         return Err(EasyedaPublicError::MalformedRecord(
@@ -116,8 +158,8 @@ pub fn export_public_archive(
         &board.build.output_sha256,
     );
     let epru_file = format!("{}.epru", archive_stem(destination)?);
-    let (epru, fill_count, hole_count) = build_epru(title, &board_uuid, &pcb_uuid, board)?;
-    let archive = build_archive(title, &epru_file, &epru)?;
+    let built = build_epru(title, &board_uuid, &pcb_uuid, document, board)?;
+    let archive = build_archive(title, &epru_file, &built.epru)?;
 
     atomic_write_validated(
         destination,
@@ -138,8 +180,11 @@ pub fn export_public_archive(
         epru_file,
         board_uuid,
         pcb_uuid,
-        fill_count,
-        hole_count,
+        fill_count: built.fill_count,
+        image_count: built.image_count,
+        string_count: built.string_count,
+        hole_count: built.hole_count,
+        layer_strategies: built.layer_strategies,
     })
 }
 
@@ -154,6 +199,8 @@ pub fn validate_public_archive(path: &Path) -> Result<PublicArchiveValidation, E
         board_width_um: 0,
         board_height_um: 0,
         fill_count: 0,
+        image_count: 0,
+        string_count: 0,
         hole_count: 0,
         filled_layer_ids: Vec::new(),
     };
@@ -193,8 +240,22 @@ pub fn validate_public_archive(path: &Path) -> Result<PublicArchiveValidation, E
     validation.board_height_um = board_meta["heightUm"].as_u64().unwrap_or_default() as u32;
     for (head, data) in &records {
         match head["type"].as_str() {
-            Some("FILL") => {
-                validation.fill_count += 1;
+            Some(kind @ ("FILL" | "IMAGE" | "STRING")) => {
+                match kind {
+                    "FILL" => validation.fill_count += 1,
+                    "IMAGE" => validation.image_count += 1,
+                    "STRING" => {
+                        validation.string_count += 1;
+                        let first_ticket = head["firstTicket"].as_u64().unwrap_or_default();
+                        let current_ticket = head["ticket"].as_u64().unwrap_or_default();
+                        if first_ticket == 0 || first_ticket >= current_ticket {
+                            validation
+                                .errors
+                                .push("STRING has no valid firstTicket".to_owned());
+                        }
+                    }
+                    _ => unreachable!(),
+                }
                 if let Some(layer_id) = data["layerId"].as_u64().map(|value| value as u32)
                     && !validation.filled_layer_ids.contains(&layer_id)
                 {
@@ -272,8 +333,10 @@ pub fn preflight_resolved_board(board: &ResolvedFabricationBoard) -> EasyedaPref
     if board.build.sampling_purpose != Some(SamplingPurpose::FormalProduction)
         || board.build.pixel_pitch_um != SamplingPurpose::FormalProduction.default_pixel_pitch_um()
     {
-        errors
-            .push("EasyEDA export requires a formalProduction resolved board at 25 um".to_owned());
+        errors.push(format!(
+            "EasyEDA export requires a formalProduction resolved board at {} um",
+            SamplingPurpose::FormalProduction.default_pixel_pitch_um()
+        ));
     }
     let expected_layers = [
         "topCopper",
@@ -318,12 +381,22 @@ pub fn preflight_resolved_board(board: &ResolvedFabricationBoard) -> EasyedaPref
     }
 }
 
+struct BuiltEpru {
+    epru: String,
+    fill_count: usize,
+    image_count: usize,
+    string_count: usize,
+    hole_count: usize,
+    layer_strategies: Vec<EasyedaLayerStrategy>,
+}
+
 fn build_epru(
     title: &str,
     board_uuid: &str,
     pcb_uuid: &str,
+    document: Option<&AtelierDocument>,
     board: &ResolvedFabricationBoard,
-) -> Result<(String, usize, usize), EasyedaPublicError> {
+) -> Result<BuiltEpru, EasyedaPublicError> {
     let mut records = Vec::new();
     let mut ticket = 1_u64;
     let mut primitive_id = 1_u64;
@@ -348,9 +421,40 @@ fn build_epru(
     push_record(
         &mut records,
         json!({"type":"META", "ticket": ticket}),
-        json!({"format":FORMAT,"title":title,"board":board_uuid,"zIndex":1,"widthUm":board.grid.width_um,"heightUm":board.grid.height_um,"artworkPrimitives":"static-fill"}),
+        json!({"format":FORMAT,"title":title,"board":board_uuid,"zIndex":1,"widthUm":board.grid.width_um,"heightUm":board.grid.height_um,"artworkPrimitives":if document.is_some() {"native-when-lossless"} else {"static-fill"}}),
     )?;
     ticket += 1;
+    push_record(
+        &mut records,
+        json!({"type":"LAYER", "ticket":ticket, "id":"[\"LAYER\",4]"}),
+        json!({
+            "layerId":4,
+            "layerType":"BOT_SILK",
+            "layerName":"Bottom Silkscreen Layer",
+            "use":true,
+            "show":true,
+            "locked":false,
+            "activeColor":"#66cc33",
+            "activateTransparency":1,
+            "inactiveColor":"#336619",
+            "inactiveTransparency":0.5
+        }),
+    )?;
+    ticket += 1;
+    push_record(
+        &mut records,
+        json!({"type":"PRIMITIVE", "ticket":ticket, "id":"[\"PRIMITIVE\",\"TEXT\"]"}),
+        json!({"display":true,"pick":true}),
+    )?;
+    ticket += 1;
+    for layer_id in [3_u32, 4_u32] {
+        push_record(
+            &mut records,
+            json!({"type":"SILK_OPTS", "ticket":ticket, "id":format!("[\"SILK_OPTS\",{layer_id}]")}),
+            json!({"defaultColor":"#000000","baseColor":"#FFFFFF"}),
+        )?;
+        ticket += 1;
+    }
     push_record(
         &mut records,
         json!({"type":"POLY", "ticket": ticket, "id":format!("e{primitive_id}")}),
@@ -359,22 +463,169 @@ fn build_epru(
     ticket += 1;
     primitive_id += 1;
     let mut fill_count = 0;
+    let mut image_count = 0;
+    let mut string_count = 0;
+    let mut layer_strategies = Vec::new();
     for layer in &board.layers {
         let layer_id = easyeda_layer_id(layer.target);
-        let mut layer_paths = Vec::new();
-        for fill in polygonize_mask(&layer.composite, &board.grid)
-            .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
+        if let Some((source, operation)) =
+            document.and_then(|document| lossless_source(document, layer))
         {
-            // The document stores both faces in physical board coordinates.
-            // Do not mirror the bottom side: JLCEDA controls bottom-view
-            // mirroring; this adapter only changes the raster Y origin.
-            layer_paths.extend(
-                easyeda_paths(&fill, &board.grid, BoardToEasyedaTransform::default())
-                    .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
-                    .into_iter()
-                    .map(|path| linear_easyeda_path(path.points_mil)),
-            );
+            match &source.kind {
+                ContentKind::Image(_) if supports_native_transform(source) => {
+                    let paths = aggregated_paths(&operation.mask, board)?;
+                    if !paths.paths.is_empty() {
+                        let center_x = um_to_mil_f64(
+                            source.transform.x_um as f64
+                                + f64::from(source.transform.width_um) / 2.0,
+                        );
+                        let center_y = um_to_mil_f64(
+                            f64::from(board.grid.height_um)
+                                - (source.transform.y_um as f64
+                                    + f64::from(source.transform.height_um) / 2.0),
+                        );
+                        let local_paths = paths
+                            .paths
+                            .into_iter()
+                            .map(|points| {
+                                linear_easyeda_path(
+                                    points
+                                        .into_iter()
+                                        .map(|(x, y)| (x - center_x, y - center_y))
+                                        .collect(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let start_x_um = match layer.target.side {
+                            CardSide::Front => source.transform.x_um as f64,
+                            CardSide::Back => {
+                                f64::from(board.grid.width_um) - source.transform.x_um as f64
+                            }
+                        };
+                        push_record(
+                            &mut records,
+                            json!({"type":"IMAGE", "ticket":ticket, "id":format!("e{primitive_id}")}),
+                            json!({
+                                "partitionId":"",
+                                "groupId":0,
+                                "layerId":layer_id,
+                                "startX":um_to_mil_f64(start_x_um),
+                                "startY":um_to_mil_f64(f64::from(board.grid.height_um) - source.transform.y_um as f64),
+                                "width":um_to_mil(i64::from(source.transform.width_um)),
+                                "height":um_to_mil(i64::from(source.transform.height_um)),
+                                "angle":0,
+                                "mirror":false,
+                                "path":local_paths,
+                                "locked":false,
+                                "specialColor":Value::Null
+                            }),
+                        )?;
+                        ticket += 1;
+                        primitive_id += 1;
+                        image_count += 1;
+                        layer_strategies.push(EasyedaLayerStrategy {
+                            target: layer.target,
+                            layer_id,
+                            strategy: EasyedaArtworkStrategy::NativeImage,
+                            fallback_reason: None,
+                            exact_contour_fallbacks: paths.exact_fallbacks,
+                        });
+                        continue;
+                    }
+                }
+                ContentKind::Text(text) if supports_native_text(source, text) => {
+                    // EasyEDA's own STRING records reserve creation/update
+                    // tickets that are not emitted as standalone records. The
+                    // baseline uses six creation steps followed by eighteen
+                    // text-property updates.
+                    let first_ticket = ticket + 6;
+                    let current_ticket = first_ticket + 18;
+                    let x_um = match layer.target.side {
+                        CardSide::Front => source.transform.x_um as f64,
+                        CardSide::Back => {
+                            f64::from(board.grid.width_um)
+                                - source.transform.x_um as f64
+                                - f64::from(source.transform.width_um)
+                        }
+                    };
+                    let font_size = um_to_mil(i64::from(text.font_size_um));
+                    let baseline_y_um = f64::from(board.grid.height_um)
+                        - source.transform.y_um as f64
+                        - f64::from(text.font_size_um);
+                    push_record(
+                        &mut records,
+                        json!({
+                            "type":"STRING",
+                            "ticket":current_ticket,
+                            "id":format!("{primitive_id:016x}"),
+                            "firstTicket":first_ticket
+                        }),
+                        json!({
+                            "partitionId":"",
+                            "groupId":0,
+                            "layerId":layer_id,
+                            "x":um_to_mil_f64(x_um),
+                            "y":um_to_mil_f64(baseline_y_um),
+                            "text":text.text,
+                            "fontFamily":"default",
+                            "fontSize":font_size,
+                            "strokeWidth":(font_size / 15.0).max(0.2),
+                            "bold":0,
+                            "italic":0,
+                            "origin":"LEFT_BOTTOM",
+                            "angle":0,
+                            "reverse":false,
+                            "expansion":0,
+                            "mirror":false,
+                            "locked":false,
+                            "zIndex":-1,
+                            "specialColor":"#cc0066"
+                        }),
+                    )?;
+                    ticket = current_ticket + 1;
+                    primitive_id += 1;
+                    string_count += 1;
+                    // Keep a production-geometry companion for EasyEDA builds
+                    // that accept STRING in the archive but silently omit it
+                    // from the 2D/3D scene. The geometry is generated from the
+                    // same formal mask, so it preserves the complete text and
+                    // exactly overlaps the editable STRING when that is shown.
+                    let compatibility_paths = aggregated_paths(&operation.mask, board)?;
+                    let exact_contour_fallbacks = compatibility_paths.exact_fallbacks;
+                    let layer_paths = compatibility_paths
+                        .paths
+                        .into_iter()
+                        .map(linear_easyeda_path)
+                        .collect::<Vec<_>>();
+                    if !layer_paths.is_empty() {
+                        push_record(
+                            &mut records,
+                            json!({"type":"FILL", "ticket":ticket, "id":format!("e{primitive_id}")}),
+                            json!({"partitionId":"","groupId":0,"netName":"","layerId":layer_id,"width":0.2,"fillStyle":"SOLID","path":layer_paths,"locked":false,"zIndex":-1,"isBridgingCopper":false,"networkList":[],"refs":[]}),
+                        )?;
+                        ticket += 1;
+                        primitive_id += 1;
+                        fill_count += 1;
+                    }
+                    layer_strategies.push(EasyedaLayerStrategy {
+                        target: layer.target,
+                        layer_id,
+                        strategy: EasyedaArtworkStrategy::NativeString,
+                        fallback_reason: None,
+                        exact_contour_fallbacks,
+                    });
+                    continue;
+                }
+                _ => {}
+            }
         }
+
+        let paths = aggregated_paths(&layer.composite, board)?;
+        let layer_paths = paths
+            .paths
+            .into_iter()
+            .map(linear_easyeda_path)
+            .collect::<Vec<_>>();
         if !layer_paths.is_empty() {
             push_record(
                 &mut records,
@@ -384,6 +635,13 @@ fn build_epru(
             ticket += 1;
             primitive_id += 1;
             fill_count += 1;
+            layer_strategies.push(EasyedaLayerStrategy {
+                target: layer.target,
+                layer_id,
+                strategy: EasyedaArtworkStrategy::AggregatedFill,
+                fallback_reason: Some(fallback_reason(document, layer)),
+                exact_contour_fallbacks: paths.exact_fallbacks,
+            });
         }
     }
     for (index, feature) in board.mechanical_features.iter().enumerate() {
@@ -419,11 +677,111 @@ fn build_epru(
         ticket += 1;
         primitive_id += 1;
     }
-    Ok((
-        records.join("\n"),
+    Ok(BuiltEpru {
+        epru: records.join("\n"),
         fill_count,
-        board.mechanical_features.len(),
-    ))
+        image_count,
+        string_count,
+        hole_count: board.mechanical_features.len(),
+        layer_strategies,
+    })
+}
+
+fn lossless_source<'a>(
+    document: &'a AtelierDocument,
+    layer: &'a ResolvedFabricationLayer,
+) -> Option<(&'a ContentLayer, &'a crate::ResolvedOperationMask)> {
+    let [operation] = layer.operations.as_slice() else {
+        return None;
+    };
+    if operation.combine != CombineMode::Add {
+        return None;
+    }
+    let source = document
+        .front
+        .layers
+        .iter()
+        .chain(&document.back.layers)
+        .find(|source| source.id == operation.source_layer_id)?;
+    Some((source, operation))
+}
+
+fn supports_native_transform(source: &ContentLayer) -> bool {
+    source.transform.rotation_mdeg.rem_euclid(360_000) == 0
+        && !source.transform.flip_x
+        && !source.transform.flip_y
+        && source.transform.width_um > 0
+        && source.transform.height_um > 0
+}
+
+fn supports_native_text(source: &ContentLayer, text: &crate::TextContent) -> bool {
+    supports_native_transform(source)
+        && !text.text.is_empty()
+        && matches!(text.font_family.as_str(), "sans-serif" | "default")
+}
+
+fn fallback_reason(document: Option<&AtelierDocument>, layer: &ResolvedFabricationLayer) -> String {
+    let Some(document) = document else {
+        return "document context was not supplied".to_owned();
+    };
+    let [operation] = layer.operations.as_slice() else {
+        return format!(
+            "production layer contains {} resolved operations",
+            layer.operations.len()
+        );
+    };
+    if operation.combine != CombineMode::Add {
+        return "resolved operation uses subtract composition".to_owned();
+    }
+    let source = document
+        .front
+        .layers
+        .iter()
+        .chain(&document.back.layers)
+        .find(|source| source.id == operation.source_layer_id);
+    match source.map(|source| (&source.kind, source)) {
+        Some((ContentKind::BoardFill(_), _)) => {
+            "board fill has no lossless IMAGE or STRING representation".to_owned()
+        }
+        Some((ContentKind::Group, _)) => {
+            "group content is represented by the resolved production mask".to_owned()
+        }
+        Some((ContentKind::Image(_), source)) if !supports_native_transform(source) => {
+            "image transform is not supported by the native IMAGE adapter".to_owned()
+        }
+        Some((ContentKind::Text(text), source)) if !supports_native_text(source, text) => {
+            "text font or transform is not supported by the native STRING adapter".to_owned()
+        }
+        Some(_) => "native primitive path was empty".to_owned(),
+        None => "resolved operation source layer is missing".to_owned(),
+    }
+}
+
+struct AggregatedPaths {
+    paths: Vec<Vec<(f64, f64)>>,
+    exact_fallbacks: usize,
+}
+
+fn aggregated_paths(
+    mask: &crate::BitMask,
+    board: &ResolvedFabricationBoard,
+) -> Result<AggregatedPaths, EasyedaPublicError> {
+    let mut paths = Vec::new();
+    let mut exact_fallbacks = 0;
+    for fill in polygonize_mask(mask, &board.grid)
+        .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
+    {
+        for path in easyeda_paths(&fill, &board.grid, BoardToEasyedaTransform::default())
+            .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
+        {
+            exact_fallbacks += usize::from(path.used_exact_raster_fallback);
+            paths.push(path.points_mil);
+        }
+    }
+    Ok(AggregatedPaths {
+        paths,
+        exact_fallbacks,
+    })
 }
 
 fn build_archive(title: &str, epru_name: &str, epru: &str) -> Result<Vec<u8>, EasyedaPublicError> {
@@ -546,6 +904,10 @@ fn easyeda_layer_id(target: ProductionTarget) -> u32 {
 
 fn um_to_mil(value_um: i64) -> f64 {
     value_um as f64 / 25.4
+}
+
+fn um_to_mil_f64(value_um: f64) -> f64 {
+    value_um / 25.4
 }
 
 fn map_atomic_error(

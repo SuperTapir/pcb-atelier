@@ -1595,10 +1595,11 @@ export function WorkspaceShell({
 
   const handleOpenProject = async () => {
     if (!confirmDiscardIfNeeded()) return;
-    const path = await selectAtelierProjectFile();
-    if (!path) return;
-    setStatus("正在打开工程…");
+    setProjectMenuOpen(false);
     try {
+      const path = await selectAtelierProjectFile();
+      if (!path) return;
+      setStatus("正在打开工程…");
       const document = await openAtelierProject(path);
       activateProject(document, path);
       setStatus(`已打开工程：${document.title}`);
@@ -1628,17 +1629,17 @@ export function WorkspaceShell({
   };
 
   const handleSaveProject = async (saveAs = false) => {
-    let path = saveAs ? null : projectPath;
-    if (!path) {
-      path = await selectAtelierSaveFile(sessionDocument.title);
-    }
-    if (!path) return;
-    setStatus("正在保存工程…");
+    setProjectMenuOpen(false);
     try {
+      let path = saveAs ? null : projectPath;
+      if (!path) {
+        path = await selectAtelierSaveFile(sessionDocument.title);
+      }
+      if (!path) return;
+      setStatus("正在保存工程…");
       const document = await saveAtelierProject(path);
       setSessionDocument(document);
       setProjectPath(path);
-      setProjectMenuOpen(false);
       setStatus(`已保存工程：${path}`);
     } catch (error) {
       setStatus(`保存工程失败：${errorMessage(error)}`);

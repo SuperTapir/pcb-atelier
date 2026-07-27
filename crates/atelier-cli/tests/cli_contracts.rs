@@ -110,7 +110,10 @@ fn production_inspect_matches_direct_core_for_the_same_pcba_fixture() {
 
     assert_eq!(actual["board"]["widthUm"], 64_000);
     assert_eq!(actual["board"]["heightUm"], 100_000);
-    assert_eq!(actual["pixelPitchUm"], 25);
+    assert_eq!(
+        actual["pixelPitchUm"],
+        atelier_core::DEFAULT_PRODUCTION_PIXEL_PITCH_UM
+    );
     let expected_document_sha256 = format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&bundle.document).expect("serialize document"))

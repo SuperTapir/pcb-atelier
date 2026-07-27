@@ -134,7 +134,7 @@ impl SamplingPurpose {
         match self {
             Self::InteractiveProxy => 250,
             Self::BoardPreview => 100,
-            Self::FormalProduction => 25,
+            Self::FormalProduction => crate::DEFAULT_PRODUCTION_PIXEL_PITCH_UM,
         }
     }
 }
@@ -454,27 +454,41 @@ fn sample_grayscale(
                 (f64::from(crop.x_millionths) + u * f64::from(crop.width_millionths)) / 1_000_000.0;
             let source_v = (f64::from(crop.y_millionths) + v * f64::from(crop.height_millionths))
                 / 1_000_000.0;
-            let source_x = (source_u * f64::from(image.width_px))
-                .floor()
-                .clamp(0.0, f64::from(image.width_px.saturating_sub(1)))
-                as u32;
-            let source_y = (source_v * f64::from(image.height_px))
-                .floor()
-                .clamp(0.0, f64::from(image.height_px.saturating_sub(1)))
-                as u32;
-            let source_index =
-                (u64::from(source_y) * u64::from(image.width_px) + u64::from(source_x)) as usize;
-            let luminance = u32::from(image.luminance[source_index]);
-            let alpha = u32::from(image.normalized_rgba[source_index * 4 + 3]);
-            let gray = match recipe.alpha_mode {
-                AlphaMode::CompositeOnWhite => (luminance * alpha + 255 * (255 - alpha)) / 255,
-                AlphaMode::AlphaAsCoverage => 255 - alpha,
-                AlphaMode::IgnoreAlpha => luminance,
-            };
-            result.push(gray as u8);
+            let source_x = source_u * f64::from(image.width_px) - 0.5;
+            let source_y = source_v * f64::from(image.height_px) - 0.5;
+            result.push(bilinear_gray(image, recipe.alpha_mode, source_x, source_y));
         }
     }
     Ok(result)
+}
+
+fn bilinear_gray(image: &PreparedImage, alpha_mode: AlphaMode, source_x: f64, source_y: f64) -> u8 {
+    let max_x = f64::from(image.width_px.saturating_sub(1));
+    let max_y = f64::from(image.height_px.saturating_sub(1));
+    let source_x = source_x.clamp(0.0, max_x);
+    let source_y = source_y.clamp(0.0, max_y);
+    let x0 = source_x.floor() as u32;
+    let y0 = source_y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width_px.saturating_sub(1));
+    let y1 = (y0 + 1).min(image.height_px.saturating_sub(1));
+    let tx = source_x - f64::from(x0);
+    let ty = source_y - f64::from(y0);
+    let top = source_gray(image, alpha_mode, x0, y0) * (1.0 - tx)
+        + source_gray(image, alpha_mode, x1, y0) * tx;
+    let bottom = source_gray(image, alpha_mode, x0, y1) * (1.0 - tx)
+        + source_gray(image, alpha_mode, x1, y1) * tx;
+    (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8
+}
+
+fn source_gray(image: &PreparedImage, alpha_mode: AlphaMode, x: u32, y: u32) -> f64 {
+    let source_index = (u64::from(y) * u64::from(image.width_px) + u64::from(x)) as usize;
+    let luminance = f64::from(image.luminance[source_index]);
+    let alpha = f64::from(image.normalized_rgba[source_index * 4 + 3]);
+    match alpha_mode {
+        AlphaMode::CompositeOnWhite => (luminance * alpha + 255.0 * (255.0 - alpha)) / 255.0,
+        AlphaMode::AlphaAsCoverage => 255.0 - alpha,
+        AlphaMode::IgnoreAlpha => luminance,
+    }
 }
 
 fn check_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), TreatmentCompileError> {

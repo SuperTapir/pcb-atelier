@@ -52,9 +52,11 @@ fn prepared_source_matches_the_bytes_entry_and_can_be_cancelled() {
 
 #[test]
 fn otsu_recipe_fingerprint_matches_the_web_contract() {
-    let mut recipe = TreatmentRecipe::default();
-    recipe.threshold = ThresholdMode::Otsu;
-    recipe.smoothing_radius_um = 500;
+    let recipe = TreatmentRecipe {
+        threshold: ThresholdMode::Otsu,
+        smoothing_radius_um: 500,
+        ..TreatmentRecipe::default()
+    };
     assert_eq!(
         recipe.fingerprint(),
         "125c4247000170252ef09a847fe1b53b76d80ad3ca3bdfa38a6632a919629156"
@@ -166,6 +168,50 @@ fn decode_normalizes_exif_orientation_before_crop_and_sampling() {
     assert!(output.mask.get(3, 0).unwrap());
     assert!(!output.mask.get(0, 0).unwrap());
     assert!(!output.mask.get(3, 5).unwrap());
+}
+
+#[test]
+fn upscaled_diagonal_is_resampled_without_source_pixel_plateaus() {
+    let source = encode_png(RgbaImage::from_fn(8, 8, |x, y| {
+        if x <= y {
+            Rgba([0, 0, 0, 255])
+        } else {
+            Rgba([255, 255, 255, 255])
+        }
+    }));
+    let mut recipe = TreatmentRecipe::standard_monochrome();
+    recipe.threshold = ThresholdMode::Manual { value: 128 };
+    let output = compile_image_treatment(
+        &source,
+        &recipe,
+        TreatmentCompileRequest {
+            physical_width_um: 8_000,
+            physical_height_um: 8_000,
+            pixel_pitch_um: 250,
+            revision: 10,
+            purpose: SamplingPurpose::FormalProduction,
+        },
+    )
+    .expect("upscaled diagonal");
+
+    let right_edges = (0..output.mask.height_px())
+        .map(|y| {
+            (0..output.mask.width_px())
+                .filter(|&x| output.mask.get(x, y).expect("mask pixel"))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let interior = &right_edges[1..right_edges.len() - 2];
+    let longest_plateau = interior
+        .chunk_by(|left, right| left == right)
+        .map(<[u32]>::len)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest_plateau <= 2,
+        "bilinear sampling must not retain four-pixel source plateaus: {right_edges:?}"
+    );
 }
 
 #[test]

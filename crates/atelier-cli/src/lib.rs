@@ -304,7 +304,7 @@ fn parse_project_and_pitch(
 
 fn parse_pitch_options(args: &[String], usage: &'static str) -> Result<u32, CliError> {
     match args {
-        [] => Ok(25),
+        [] => Ok(atelier_core::DEFAULT_PRODUCTION_PIXEL_PITCH_UM),
         [flag, value] if flag == "--pitch-um" => value
             .parse::<u32>()
             .ok()

@@ -482,6 +482,14 @@ export function WorkspaceCanvas({
     document.manufacturerProfile,
   );
   const palette = getViewPalette(workContext, manufacturerPalette);
+  const contentFill = (layer: ContentLayer) =>
+    getContentLayerFill(
+      layer,
+      document.mappings,
+      face,
+      workContext,
+      manufacturerPalette,
+    );
   const cursor = isPanning
     ? "cursor-grabbing"
     : tool === "text"
@@ -704,6 +712,7 @@ export function WorkspaceCanvas({
                     key={layer.id}
                     layer={layer}
                     layers={layers}
+                    fill={contentFill(layer)}
                     boardHeightUm={document.board.heightUm}
                     boardWidthUm={document.board.widthUm}
                     onBeginTextEdit={onBeginTextEdit}
@@ -817,6 +826,7 @@ export function shouldClearCanvasSelection(
 
 function ContentNode({
   aspectRatioLocked,
+  fill,
   image,
   layer,
   layers,
@@ -836,6 +846,7 @@ function ContentNode({
   listening,
 }: {
   aspectRatioLocked: boolean;
+  fill: string;
   image?: HTMLImageElement;
   layer: ContentLayer;
   onBeginTextEdit: (layerId: string) => void;
@@ -1081,7 +1092,7 @@ function ContentNode({
           ))}
         {layer.kind.type === "text" && (
           <Text
-            fill="#2b2924"
+            fill={fill}
             fontFamily={layer.kind.fontFamily}
             fontSize={layer.kind.fontSizeUm / 1_000}
             text={layer.kind.text}
@@ -1590,6 +1601,32 @@ export function isVisibleInProductionContext(
     targets.length === 0 ||
     targets.some((mapping) => visibility[mapping.target.layer])
   );
+}
+
+export function getContentLayerFill(
+  layer: ContentLayer,
+  mappings: WorkspaceDocument["mappings"],
+  face: CardFace,
+  workContext: WorkContext,
+  manufacturer: ReturnType<typeof getManufacturerPalette>,
+) {
+  const targets = mappings.filter(
+    (mapping) =>
+      mapping.sourceLayerId === layer.id && mapping.target.side === face,
+  );
+  const target =
+    targets.find((mapping) => mapping.target.layer === workContext)?.target
+      .layer ?? targets[0]?.target.layer;
+  switch (target) {
+    case "copper":
+      return manufacturer.exposedCopper;
+    case "solderMaskOpen":
+      return manufacturer.substrate;
+    case "silkscreen":
+      return manufacturer.silkscreen;
+    default:
+      return "#2b2924";
+  }
 }
 
 function isInsideBoard(point: Point, widthMm: number, heightMm: number) {

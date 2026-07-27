@@ -51,6 +51,9 @@ impl Default for BoardToEasyedaTransform {
 pub struct EasyedaFillPath {
     /// Closed path coordinates in EasyEDA's mil unit, ready for a static FILL.
     pub points_mil: Vec<(f64, f64)>,
+    /// True only when every bounded smoothing candidate was geometrically
+    /// unsafe and this ring retained the exact raster boundary.
+    pub used_exact_raster_fallback: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -161,7 +164,7 @@ pub fn easyeda_paths(
     fill.rings
         .iter()
         .map(|ring| {
-            let vector_ring = vectorize_raster_staircase_ring(ring);
+            let (vector_ring, used_exact_raster_fallback) = vectorize_raster_staircase_ring(ring);
             let mut points = vector_ring
                 .iter()
                 .map(|point| {
@@ -196,7 +199,10 @@ pub fn easyeda_paths(
                     points.push(first);
                 }
             }
-            Ok(EasyedaFillPath { points_mil: points })
+            Ok(EasyedaFillPath {
+                points_mil: points,
+                used_exact_raster_fallback,
+            })
         })
         .collect()
 }
@@ -211,15 +217,19 @@ pub fn easyeda_paths(
 /// raster-grid vertices, matching the geometry produced by EasyEDA's native
 /// image importer.
 ///
-/// Ring grouping happens before this function is called. If vectorization
-/// would reverse winding, degenerate, or create a self-intersection, the exact
-/// raster boundary is returned for that ring.
-fn vectorize_raster_staircase_ring(ring: &[GridVertex]) -> Vec<VectorVertex> {
+/// Ring grouping happens before this function is called. Candidates are tried
+/// from strongest to weakest so a locally unsafe simplification does not
+/// immediately expose the exact raster staircase. The exact boundary remains
+/// the final topology-preserving fallback.
+fn vectorize_raster_staircase_ring(ring: &[GridVertex]) -> (Vec<VectorVertex>, bool) {
     const CORNER_TRIM_PX: f64 = 0.35;
     const SIMPLIFY_DEVIATION_PX: f64 = 0.5;
 
     if ring.len() <= 5 || ring.first() != ring.last() {
-        return ring.iter().copied().map(VectorVertex::from).collect();
+        return (
+            ring.iter().copied().map(VectorVertex::from).collect(),
+            false,
+        );
     }
     let exact = ring
         .iter()
@@ -228,16 +238,23 @@ fn vectorize_raster_staircase_ring(ring: &[GridVertex]) -> Vec<VectorVertex> {
         .collect::<Vec<_>>();
     let rounded_once = cut_vector_corners(&exact, CORNER_TRIM_PX);
     let rounded_twice = cut_vector_corners(&rounded_once, CORNER_TRIM_PX);
-    let candidate = simplify_closed_vector_ring(&rounded_twice, SIMPLIFY_DEVIATION_PX.powi(2));
-
-    if candidate.len() < 4
-        || vector_ring_area(&candidate).signum() != ring_area(ring).signum() as f64
-        || vector_ring_has_self_intersection(&candidate)
-    {
-        exact
-    } else {
-        candidate
+    let candidates = [
+        simplify_closed_vector_ring(&rounded_twice, SIMPLIFY_DEVIATION_PX.powi(2)),
+        simplify_closed_vector_ring(&rounded_once, (SIMPLIFY_DEVIATION_PX / 2.0).powi(2)),
+        rounded_once,
+    ];
+    for candidate in candidates {
+        if vector_candidate_is_safe(&candidate, ring) {
+            return (candidate, false);
+        }
     }
+    (exact, true)
+}
+
+fn vector_candidate_is_safe(candidate: &[VectorVertex], exact: &[GridVertex]) -> bool {
+    candidate.len() >= 4
+        && vector_ring_area(candidate).signum() == ring_area(exact).signum() as f64
+        && !vector_ring_has_self_intersection(candidate)
 }
 
 fn cut_vector_corners(ring: &[VectorVertex], trim: f64) -> Vec<VectorVertex> {

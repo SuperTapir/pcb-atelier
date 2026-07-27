@@ -20,17 +20,21 @@ use crate::{
     ManufacturerProfileSnapshot, MappingId, ProductionTarget, ProjectBundle,
     PublicArchiveValidation, ResolvedFabricationBoard, SamplingPurpose, SolderMaskColor,
     SubstrateMaterial, SurfaceFinish, TransformUm, TreatmentId, atomic_write_validated,
-    convert_easyeda_archive_to_native, export_public_archive, validate_public_archive,
+    convert_easyeda_archive_to_native, export_public_archive_with_document,
+    validate_public_archive,
 };
 
-pub const EASYEDA_HANDOFF_EXPORT_FORMAT_VERSION: &str = "atelier-easyeda-handoff-v3";
+pub const EASYEDA_HANDOFF_EXPORT_FORMAT_VERSION: &str = "atelier-easyeda-handoff-v4";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EasyedaPrimitiveStatistics {
     pub fill_count: usize,
+    pub image_count: usize,
+    pub string_count: usize,
     pub hole_count: usize,
     pub filled_layer_ids: Vec<u32>,
+    pub layer_strategies: Vec<crate::EasyedaLayerStrategy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,7 +193,12 @@ pub fn export_easyeda_handoff(
         write_color_silkscreen_resources(destination_directory, &export_version, bundle)?;
     let order_support = order_support(&document.manufacturer_profile, &color_silkscreen_resources);
 
-    let public = export_public_archive(&public_archive_path, &document.title, board)?;
+    let public = export_public_archive_with_document(
+        &public_archive_path,
+        &document.title,
+        document,
+        board,
+    )?;
     let public_validation = validate_public_archive(&public_archive_path)?;
     let native = convert_easyeda_archive_to_native(&public_archive_path, &native_project_path)?;
     let report = EasyedaHandoffExportReport {
@@ -209,8 +218,11 @@ pub fn export_easyeda_handoff(
         order_support,
         primitives: EasyedaPrimitiveStatistics {
             fill_count: public.fill_count,
+            image_count: public.image_count,
+            string_count: public.string_count,
             hole_count: public.hole_count,
             filled_layer_ids: public_validation.filled_layer_ids.clone(),
+            layer_strategies: public.layer_strategies,
         },
         public_validation,
         native_validation: native.validation,
