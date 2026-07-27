@@ -82,6 +82,34 @@ RSS 无法区分 JavaScript heap、纹理缓存和宿主内存；出现持续增
 编辑器引入更多缓存时，必须再用 Safari Web Inspector 的 JavaScript Allocations
 或 Instruments 的 Allocations 模板比较第 4 与第 24 轮 retained allocations。
 
+## 图片交互 `interactive-image-v1`
+
+图片交互基准固定使用
+[`profile.json`](./interactive-image-v1/profile.json) 中记录的 1003×1568 PNG/JPEG、
+51.17×80 mm 物理尺寸和 250 µm warm 代理。执行：
+
+```bash
+npm run benchmark:interactive-image
+```
+
+release bridge 会验证源图只在 `begin_image_preview_source` 出现一次，随后 30 个非缓存
+阈值/反相请求只携带 handle、recipe 与 generation；再以 60 个超吞吐输入验证最终
+generation、协作取消和单 stream 的“一个运行 + 一个最新 pending”。2026-07-27
+Mac13,1 / Apple M1 Max / macOS 26.5.2 / AC 实测：
+
+- 源 PNG `136,309 bytes`；一次性 begin JSON `481,913 bytes`；
+- 后续预览 JSON `602 bytes`，不含源图；
+- prepared source `1` 次，60 次 burst 取消 `59` 个陈旧请求；
+- 205×320 代理的 30 个非缓存结果 `p50 2.97 ms / p95 3.71 ms`；
+- 完整结果见
+  [`baseline-macos-2026-07-27.json`](./interactive-image-v1/baseline-macos-2026-07-27.json)。
+
+bridge 数字包含 Rust 处理、PNG 编码、base64、HTTP 和 JSON 解析，但不包含浏览器
+`Image.decode()`/纹理可绘制边界；浏览器 E2E 和 Tauri 手势基准继续负责 120 ms
+drawable feedback 与 16.7 ms 拖动帧目标。首轮保留 PNG data URL：当前整体边界只占
+120 ms 预算的一小部分；若浏览器分段 profile 证明 PNG 编码、base64 和客户端解码合计
+超过 20%，再切换二进制响应或受控资源 URL。
+
 ## 双画板实测
 
 2026-07-26 在 Headless Chrome 150、`1440 × 900` 上执行 production bundle：

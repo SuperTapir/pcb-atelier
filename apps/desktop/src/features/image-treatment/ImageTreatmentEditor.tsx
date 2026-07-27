@@ -8,12 +8,20 @@ import {
 } from "react";
 
 import {
+  fingerprintTreatmentRecipe,
   TreatmentPreviewCoordinator,
   type TreatmentPreviewAccepted,
 } from "@/features/image-treatment/treatment-preview-coordinator";
 import {
+  getImageProxyKey,
+  treatmentProxyBroker,
+} from "@/features/image-treatment/image-proxy-broker";
+import {
+  beginImagePreviewSource,
   compileImageTreatment,
   getAssetBytes,
+  releaseImagePreviewSource,
+  requestImagePreview,
   setTreatmentRecipe,
   type AssetReference,
   type ImageTreatment,
@@ -41,7 +49,10 @@ export interface ImageTreatmentEditorProps {
   compileReport?: TreatmentCompileReport | null;
   debounceMs?: number;
   persistRecipe?: (recipe: TreatmentRecipe) => Promise<unknown>;
-  compileInteractiveProxy?: () => Promise<TreatmentCompileReport>;
+  compileInteractiveProxy?: (
+    recipe: TreatmentRecipe,
+    generation: number,
+  ) => Promise<TreatmentCompileReport>;
   onRecipeChange?: (recipe: TreatmentRecipe) => void;
   onProductionModeChange?: (
     mode: ImageTreatment["productionMode"],
@@ -83,6 +94,13 @@ export function ImageTreatmentEditor({
   const [originalHeld, setOriginalHeld] = useState(false);
   const [previewPending, setPreviewPending] = useState(false);
   const [cropDialogOpen, setCropDialogOpen] = useState(false);
+  const [previewSession, setPreviewSession] = useState<ReturnType<
+    typeof beginImagePreviewSource
+  > | null>(null);
+  const draftRecipeRef = useRef(draftRecipe);
+  const committedRecipeRef = useRef(treatment.recipe);
+  const acceptedRecipeRef = useRef<TreatmentRecipe | null>(null);
+  const acceptedFingerprintRef = useRef<string | null>(null);
   const pointerStartedAt = useRef<number | null>(null);
   const onCompileAcceptedRef = useRef(onCompileAccepted);
   const onErrorRef = useRef(onError);
@@ -97,24 +115,52 @@ export function ImageTreatmentEditor({
   const usesColorOriginal = treatment.productionMode === "colorOriginal";
   const previewUpdating =
     previewPending || (!compileReport && resultPreviewUrl === undefined);
-
   const coordinator = useMemo(
     () =>
       new TreatmentPreviewCoordinator({
         debounceMs,
-        persistRecipe:
-          props.persistRecipe ??
-          ((recipe) => setTreatmentRecipe(treatment.id, recipe)),
-        compileInteractiveProxy:
-          props.compileInteractiveProxy ??
-          (() =>
-            compileImageTreatment(
+        compileInteractiveProxy: async (recipe, generation) => {
+          if (props.compileInteractiveProxy) {
+            return props.compileInteractiveProxy(recipe, generation);
+          }
+          const session = await previewSession;
+          if (!session) {
+            return compileImageTreatment(
               treatment.id,
               physicalWidthUm,
               physicalHeightUm,
               "interactiveProxy",
-            )),
+            );
+          }
+          const subscription = treatmentProxyBroker.acquire(
+            getImageProxyKey(
+              treatment,
+              physicalWidthUm,
+              physicalHeightUm,
+              250,
+              recipe,
+            ),
+            () =>
+              requestImagePreview({
+                sourceHandle: session.sourceHandle,
+                previewStreamId: `inspector:${treatment.id}`,
+                generation,
+                workspaceRevision: session.workspaceRevision,
+                recipe,
+                physicalWidthUm,
+                physicalHeightUm,
+                pixelPitchUm: 250,
+              }),
+          );
+          try {
+            return await subscription.value;
+          } finally {
+            subscription.release();
+          }
+        },
         onAccepted: (result) => {
+          acceptedRecipeRef.current = result.recipe;
+          acceptedFingerprintRef.current = result.report.recipeFingerprint;
           setPreviewPending(false);
           onCompileAcceptedRef.current(result);
         },
@@ -128,7 +174,7 @@ export function ImageTreatmentEditor({
       physicalHeightUm,
       physicalWidthUm,
       props.compileInteractiveProxy,
-      props.persistRecipe,
+      previewSession,
       treatment.id,
     ],
   );
@@ -138,45 +184,94 @@ export function ImageTreatmentEditor({
     return () => coordinator.dispose();
   }, [coordinator]);
   useEffect(() => {
+    if (props.compileInteractiveProxy) {
+      setPreviewSession(null);
+      return;
+    }
+    const session = beginImagePreviewSource({ assetId: asset.id });
+    setPreviewSession(session);
+    return () => {
+      void session
+        .then(({ sourceHandle }) => releaseImagePreviewSource(sourceHandle))
+        .catch(() => undefined);
+    };
+  }, [asset.id, props.compileInteractiveProxy]);
+  useEffect(() => {
     setDraftRecipe(treatment.recipe);
+    draftRecipeRef.current = treatment.recipe;
+    committedRecipeRef.current = treatment.recipe;
   }, [treatment.id, treatment.recipe]);
   useEffect(() => {
     onTemporaryOriginalChange?.(showOriginalOnCanvas);
   }, [onTemporaryOriginalChange, showOriginalOnCanvas]);
 
   const updateRecipe = (recipe: TreatmentRecipe) => {
+    draftRecipeRef.current = recipe;
     setDraftRecipe(recipe);
     setPreviewPending(true);
     onRecipeChange?.(recipe);
     coordinator.update(recipe);
   };
-  const patchRecipe = (patch: Partial<TreatmentRecipe>) =>
-    updateRecipe({ ...draftRecipe, ...patch });
+  const commitDraft = () => {
+    const recipe = draftRecipeRef.current;
+    if (
+      JSON.stringify(recipe) === JSON.stringify(committedRecipeRef.current)
+    ) {
+      return;
+    }
+    const persist =
+      props.persistRecipe ??
+      ((nextRecipe: TreatmentRecipe) =>
+        setTreatmentRecipe(treatment.id, nextRecipe));
+    const previousRecipe = committedRecipeRef.current;
+    committedRecipeRef.current = recipe;
+    void persist(recipe)
+      .catch((error) => {
+        if (committedRecipeRef.current === recipe) {
+          committedRecipeRef.current = previousRecipe;
+        }
+        onErrorRef.current?.(error);
+      });
+  };
+  const patchRecipe = (
+    patch: Partial<TreatmentRecipe>,
+    commit = false,
+  ) => {
+    updateRecipe({ ...draftRecipeRef.current, ...patch });
+    if (commit) queueMicrotask(commitDraft);
+  };
   const crop = asTreatmentCrop(draftRecipe.crop);
 
   useEffect(() => {
     if (
-      draftRecipe.threshold.mode !== "otsu" ||
+      acceptedRecipeRef.current?.threshold.mode !== "otsu" ||
       previewPending ||
-      !compileReport
+      !compileReport ||
+      compileReport.recipeFingerprint !== acceptedFingerprintRef.current
     ) {
       return;
     }
     const recipe: TreatmentRecipe = {
-      ...draftRecipe,
+      ...acceptedRecipeRef.current,
       threshold: {
         mode: "manual",
         value: compileReport.appliedThreshold,
       },
     };
+    acceptedRecipeRef.current = null;
+    acceptedFingerprintRef.current = null;
+    draftRecipeRef.current = recipe;
     setDraftRecipe(recipe);
-    setPreviewPending(true);
     onRecipeChange?.(recipe);
-    coordinator.update(recipe);
+    queueMicrotask(commitDraft);
+    void fingerprintTreatmentRecipe(recipe).then((recipeFingerprint) => {
+      onCompileAcceptedRef.current({
+        recipe,
+        report: { ...compileReport, recipeFingerprint },
+      });
+    });
   }, [
     compileReport,
-    coordinator,
-    draftRecipe,
     onRecipeChange,
     previewPending,
   ]);
@@ -334,7 +429,7 @@ export function ImageTreatmentEditor({
             onChange={(value) =>
               patchRecipe({
                 alphaMode: value as TreatmentRecipe["alphaMode"],
-              })
+              }, true)
             }
             options={[
               ["compositeOnWhite", "合成到白底"],
@@ -353,6 +448,7 @@ export function ImageTreatmentEditor({
                   threshold: { mode: "manual", value: Math.round(value) },
                 })
               }
+              onCommit={commitDraft}
               step={1}
               unit=""
               value={
@@ -379,7 +475,7 @@ export function ImageTreatmentEditor({
               aria-label="反相"
               checked={draftRecipe.invert}
               onChange={(event) =>
-                patchRecipe({ invert: event.currentTarget.checked })
+                patchRecipe({ invert: event.currentTarget.checked }, true)
               }
               type="checkbox"
             />
@@ -406,7 +502,7 @@ export function ImageTreatmentEditor({
                   patchRecipe({
                     thinFeaturePolicy: event.currentTarget
                       .value as TreatmentRecipe["thinFeaturePolicy"],
-                  })
+                  }, true)
                 }
                 value={draftRecipe.thinFeaturePolicy}
               >
@@ -424,6 +520,7 @@ export function ImageTreatmentEditor({
               onChange={(value) =>
                 patchRecipe({ smoothingRadiusUm: millimetresToUm(value) })
               }
+              onCommit={commitDraft}
               step={0.01}
               unit="mm"
               value={draftRecipe.smoothingRadiusUm / 1_000}
@@ -435,6 +532,7 @@ export function ImageTreatmentEditor({
               onChange={(value) =>
                 patchRecipe({ despeckleRadiusUm: millimetresToUm(value) })
               }
+              onCommit={commitDraft}
               step={0.01}
               unit="mm"
               value={draftRecipe.despeckleRadiusUm / 1_000}
@@ -448,6 +546,7 @@ export function ImageTreatmentEditor({
                   removeIslandsBelowUm2: Math.round(value * 1_000_000),
                 })
               }
+              onCommit={commitDraft}
               step={0.01}
               unit="mm²"
               value={draftRecipe.removeIslandsBelowUm2 / 1_000_000}
@@ -459,6 +558,7 @@ export function ImageTreatmentEditor({
               onChange={(value) =>
                 patchRecipe({ minimumLineWidthUm: millimetresToUm(value) })
               }
+              onCommit={commitDraft}
               step={0.01}
               unit="mm"
               value={draftRecipe.minimumLineWidthUm / 1_000}
@@ -470,6 +570,7 @@ export function ImageTreatmentEditor({
               onChange={(value) =>
                 patchRecipe({ minimumGapUm: millimetresToUm(value) })
               }
+              onCommit={commitDraft}
               step={0.01}
               unit="mm"
               value={draftRecipe.minimumGapUm / 1_000}
@@ -492,7 +593,7 @@ export function ImageTreatmentEditor({
             <button
               aria-label="移除裁切"
               className="shrink-0 rounded-md px-2 py-1.5 text-[9px] text-muted-foreground hover:bg-accent"
-              onClick={() => patchRecipe({ crop: null })}
+              onClick={() => patchRecipe({ crop: null }, true)}
               type="button"
             >
               移除
@@ -522,7 +623,7 @@ export function ImageTreatmentEditor({
           imageUrl={originalPreviewUrl}
           onCancel={() => setCropDialogOpen(false)}
           onConfirm={(nextCrop) => {
-            patchRecipe({ crop: nextCrop });
+            patchRecipe({ crop: nextCrop }, true);
             setCropDialogOpen(false);
           }}
           pixelHeight={asset.pixelHeight}
@@ -968,6 +1069,7 @@ function RecipeRangeInput({
   max,
   min,
   onChange,
+  onCommit,
   step,
   unit,
   value,
@@ -976,6 +1078,7 @@ function RecipeRangeInput({
   max?: number;
   min: number;
   onChange: (value: number) => void;
+  onCommit?: () => void;
   step: number;
   unit: string;
   value: number;
@@ -1009,6 +1112,19 @@ function RecipeRangeInput({
         max={rangeMaximum}
         min={min}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
+        onBlur={onCommit}
+        onKeyUp={(event) => {
+          if (
+            event.key === "ArrowLeft" ||
+            event.key === "ArrowRight" ||
+            event.key === "Home" ||
+            event.key === "End"
+          ) {
+            onCommit?.();
+          }
+        }}
+        onPointerCancel={onCommit}
+        onPointerUp={onCommit}
         step={step}
         type="range"
         value={Math.min(rangeMaximum, Math.max(min, value))}

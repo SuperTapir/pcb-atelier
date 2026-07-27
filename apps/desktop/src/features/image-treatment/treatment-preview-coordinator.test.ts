@@ -33,17 +33,32 @@ describe("TreatmentPreviewCoordinator", () => {
     );
   });
 
+  it("canonicalizes recipes received with transport-sorted keys", async () => {
+    const transportRecipe = {
+      algorithmVersion: "atelier-image-treatment-v2",
+      alphaMode: "compositeOnWhite",
+      crop: null,
+      despeckleRadiusUm: 0,
+      invert: false,
+      minimumGapUm: 0,
+      minimumLineWidthUm: 0,
+      removeIslandsBelowUm2: 0,
+      smoothingRadiusUm: 500,
+      thinFeaturePolicy: "preserve",
+      threshold: { mode: "otsu" },
+    } satisfies TreatmentRecipe;
+    await expect(fingerprintTreatmentRecipe(transportRecipe)).resolves.toBe(
+      "125c4247000170252ef09a847fe1b53b76d80ad3ca3bdfa38a6632a919629156",
+    );
+  });
+
   it("coalesces recipe edits into one 100ms interactive compile", async () => {
     vi.useFakeTimers();
-    const persisted: TreatmentRecipe[] = [];
     const accepted: TreatmentPreviewAccepted[] = [];
     const coordinator = new TreatmentPreviewCoordinator({
       debounceMs: 100,
       fingerprint: async (recipe) =>
         `fp-${recipe.threshold.mode === "manual" ? recipe.threshold.value : "otsu"}`,
-      persistRecipe: async (recipe) => {
-        persisted.push(recipe);
-      },
       compileInteractiveProxy: async () =>
         report("fp-180", 4),
       onAccepted: (result) => accepted.push(result),
@@ -56,10 +71,9 @@ describe("TreatmentPreviewCoordinator", () => {
       threshold: { mode: "manual", value: 180 },
     });
     await vi.advanceTimersByTimeAsync(99);
-    expect(persisted).toHaveLength(0);
+    expect(accepted).toHaveLength(0);
 
     await vi.advanceTimersByTimeAsync(1);
-    expect(persisted).toHaveLength(1);
     expect(accepted).toHaveLength(1);
     expect(accepted[0]?.report.revision).toBe(4);
   });
@@ -70,7 +84,6 @@ describe("TreatmentPreviewCoordinator", () => {
     const coordinator = new TreatmentPreviewCoordinator({
       debounceMs: 100,
       fingerprint: async () => "fp-128",
-      persistRecipe: async () => undefined,
       compileInteractiveProxy: async () => report("fp-128", 1),
       onAccepted: (result) => accepted.push(result),
     });
@@ -93,7 +106,6 @@ describe("TreatmentPreviewCoordinator", () => {
       debounceMs: 100,
       fingerprint: async (recipe) =>
         `fp-${recipe.threshold.mode === "manual" ? recipe.threshold.value : "otsu"}`,
-      persistRecipe: async () => undefined,
       compileInteractiveProxy: () =>
         new Promise((resolve) => compiles.push({ resolve })),
       onAccepted: (result) => accepted.push(result),

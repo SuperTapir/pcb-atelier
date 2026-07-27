@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::VecDeque, io::Cursor};
+use std::{collections::VecDeque, io::Cursor, sync::Arc};
 use thiserror::Error;
 
-use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader};
+use image::{DynamicImage, ImageDecoder, ImageReader};
 
 use crate::{AssetId, BitMask, CropRect, FabricationResolveError, PhysicalBoundsUm, TreatmentId};
 
@@ -198,6 +198,35 @@ pub struct CompiledImageTreatment {
     pub diagnostics: Vec<TreatmentDiagnostic>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedImage {
+    width_px: u32,
+    height_px: u32,
+    normalized_rgba: Arc<[u8]>,
+    luminance: Arc<[u8]>,
+    source_sha256: String,
+}
+
+impl PreparedImage {
+    pub const fn width_px(&self) -> u32 {
+        self.width_px
+    }
+
+    pub const fn height_px(&self) -> u32 {
+        self.height_px
+    }
+
+    pub fn source_sha256(&self) -> &str {
+        &self.source_sha256
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.normalized_rgba
+            .len()
+            .saturating_add(self.luminance.len())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TreatmentCompileError {
     #[error("image treatment dimensions and pixel pitch must be positive")]
@@ -212,6 +241,8 @@ pub enum TreatmentCompileError {
     Decode(#[from] image::ImageError),
     #[error("could not allocate or access image treatment mask: {0}")]
     Mask(#[from] FabricationResolveError),
+    #[error("image treatment compilation was cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -227,8 +258,51 @@ pub fn compile_image_treatment(
     recipe: &TreatmentRecipe,
     request: TreatmentCompileRequest,
 ) -> Result<CompiledImageTreatment, TreatmentCompileError> {
-    if bytes.is_empty()
-        || request.physical_width_um == 0
+    let prepared = prepare_image(bytes)?;
+    compile_prepared_image(&prepared, recipe, request)
+}
+
+pub fn prepare_image(bytes: &[u8]) -> Result<PreparedImage, TreatmentCompileError> {
+    if bytes.is_empty() {
+        return Err(TreatmentCompileError::InvalidDimensions);
+    }
+    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut decoder = reader.into_decoder()?;
+    let orientation = decoder.orientation()?;
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    let image = image.to_rgba8();
+    let luminance = image
+        .pixels()
+        .map(|pixel| {
+            let [red, green, blue, _] = pixel.0;
+            ((299 * u32::from(red) + 587 * u32::from(green) + 114 * u32::from(blue)) / 1_000) as u8
+        })
+        .collect::<Vec<_>>();
+    Ok(PreparedImage {
+        width_px: image.width(),
+        height_px: image.height(),
+        normalized_rgba: Arc::from(image.into_raw()),
+        luminance: Arc::from(luminance),
+        source_sha256: format!("{:x}", Sha256::digest(bytes)),
+    })
+}
+
+pub fn compile_prepared_image(
+    prepared: &PreparedImage,
+    recipe: &TreatmentRecipe,
+    request: TreatmentCompileRequest,
+) -> Result<CompiledImageTreatment, TreatmentCompileError> {
+    compile_prepared_image_with_cancel(prepared, recipe, request, || false)
+}
+
+pub fn compile_prepared_image_with_cancel(
+    prepared: &PreparedImage,
+    recipe: &TreatmentRecipe,
+    request: TreatmentCompileRequest,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<CompiledImageTreatment, TreatmentCompileError> {
+    if request.physical_width_um == 0
         || request.physical_height_um == 0
         || request.pixel_pitch_um == 0
     {
@@ -240,15 +314,10 @@ pub fn compile_image_treatment(
         }
         TreatmentRecipeValidationError::InvalidCrop => TreatmentCompileError::InvalidCrop,
     })?;
-    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
-    let mut decoder = reader.into_decoder()?;
-    let orientation = decoder.orientation()?;
-    let mut image = DynamicImage::from_decoder(decoder)?;
-    image.apply_orientation(orientation);
-
+    check_cancelled(&mut cancelled)?;
     let width_px = request.physical_width_um.div_ceil(request.pixel_pitch_um);
     let height_px = request.physical_height_um.div_ceil(request.pixel_pitch_um);
-    let grayscale = sample_grayscale(&image, recipe, width_px, height_px);
+    let grayscale = sample_grayscale(prepared, recipe, width_px, height_px, &mut cancelled)?;
     let threshold = match recipe.threshold {
         ThresholdMode::Otsu => otsu_threshold(&grayscale),
         ThresholdMode::Manual { value } => value,
@@ -260,6 +329,7 @@ pub fn compile_image_treatment(
             if recipe.invert { !ink } else { ink }
         })
         .collect::<Vec<_>>();
+    check_cancelled(&mut cancelled)?;
 
     if recipe.smoothing_radius_um > 0 {
         active = majority_smooth(
@@ -269,6 +339,7 @@ pub fn compile_image_treatment(
             recipe.smoothing_radius_um.div_ceil(request.pixel_pitch_um),
         );
     }
+    check_cancelled(&mut cancelled)?;
 
     let mut diagnostics = remove_specks(
         &mut active,
@@ -279,6 +350,7 @@ pub fn compile_image_treatment(
         request.physical_height_um,
         recipe.despeckle_radius_um,
     );
+    check_cancelled(&mut cancelled)?;
     diagnostics.extend(remove_small_islands(
         &mut active,
         width_px,
@@ -288,6 +360,7 @@ pub fn compile_image_treatment(
         request.physical_height_um,
         recipe.remove_islands_below_um2,
     ));
+    check_cancelled(&mut cancelled)?;
     diagnostics.extend(apply_thin_feature_policy(
         &mut active,
         width_px,
@@ -296,6 +369,7 @@ pub fn compile_image_treatment(
         recipe.minimum_line_width_um,
         recipe.thin_feature_policy,
     ));
+    check_cancelled(&mut cancelled)?;
     if recipe.minimum_gap_um > 0
         && has_narrow_inactive_gap(
             &active,
@@ -312,6 +386,9 @@ pub fn compile_image_treatment(
     let topology = topology(&active, width_px, height_px);
     let mut mask = BitMask::new(width_px, height_px)?;
     for y in 0..height_px {
+        if y % 16 == 0 {
+            check_cancelled(&mut cancelled)?;
+        }
         for x in 0..width_px {
             mask.set(x, y, active[index(width_px, x, y)])?;
         }
@@ -352,11 +429,12 @@ pub fn treatment_cache_key(
 }
 
 fn sample_grayscale(
-    image: &DynamicImage,
+    image: &PreparedImage,
     recipe: &TreatmentRecipe,
     width_px: u32,
     height_px: u32,
-) -> Vec<u8> {
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<u8>, TreatmentCompileError> {
     let crop = recipe.crop.clone().unwrap_or(CropRect {
         x_millionths: 0,
         y_millionths: 0,
@@ -365,6 +443,9 @@ fn sample_grayscale(
     });
     let mut result = Vec::with_capacity((u64::from(width_px) * u64::from(height_px)) as usize);
     for y in 0..height_px {
+        if y % 16 == 0 {
+            check_cancelled(cancelled)?;
+        }
         for x in 0..width_px {
             let u = (f64::from(x) + 0.5) / f64::from(width_px);
             let v = (f64::from(y) + 0.5) / f64::from(height_px);
@@ -372,19 +453,18 @@ fn sample_grayscale(
                 (f64::from(crop.x_millionths) + u * f64::from(crop.width_millionths)) / 1_000_000.0;
             let source_v = (f64::from(crop.y_millionths) + v * f64::from(crop.height_millionths))
                 / 1_000_000.0;
-            let source_x = (source_u * f64::from(image.width()))
+            let source_x = (source_u * f64::from(image.width_px))
                 .floor()
-                .clamp(0.0, f64::from(image.width().saturating_sub(1)))
+                .clamp(0.0, f64::from(image.width_px.saturating_sub(1)))
                 as u32;
-            let source_y = (source_v * f64::from(image.height()))
+            let source_y = (source_v * f64::from(image.height_px))
                 .floor()
-                .clamp(0.0, f64::from(image.height().saturating_sub(1)))
+                .clamp(0.0, f64::from(image.height_px.saturating_sub(1)))
                 as u32;
-            let pixel = image.get_pixel(source_x, source_y).0;
-            let luminance =
-                (299 * u32::from(pixel[0]) + 587 * u32::from(pixel[1]) + 114 * u32::from(pixel[2]))
-                    / 1_000;
-            let alpha = u32::from(pixel[3]);
+            let source_index =
+                (u64::from(source_y) * u64::from(image.width_px) + u64::from(source_x)) as usize;
+            let luminance = u32::from(image.luminance[source_index]);
+            let alpha = u32::from(image.normalized_rgba[source_index * 4 + 3]);
             let gray = match recipe.alpha_mode {
                 AlphaMode::CompositeOnWhite => (luminance * alpha + 255 * (255 - alpha)) / 255,
                 AlphaMode::AlphaAsCoverage => 255 - alpha,
@@ -393,7 +473,15 @@ fn sample_grayscale(
             result.push(gray as u8);
         }
     }
-    result
+    Ok(result)
+}
+
+fn check_cancelled(cancelled: &mut impl FnMut() -> bool) -> Result<(), TreatmentCompileError> {
+    if cancelled() {
+        Err(TreatmentCompileError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn valid_crop(crop: Option<&CropRect>) -> bool {

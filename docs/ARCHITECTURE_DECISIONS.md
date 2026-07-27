@@ -100,6 +100,23 @@ Vite 开发模式通过代理使用；production Web 后端和 Web 目录选择�
 Rust 契约测试已验证当前文档预览、版本字段与 Tauri adapter 等价。浏览器 E2E 和
 Tauri 实际交互是不同验证层，尚不能因为 adapter 单测通过就宣称完整桌面流程通过。
 
+### 图片 draft、prepared source 与正式生产边界
+
+图片参数输入采用显式 `ImagePreviewSession`：外部图片只在 begin 阶段传一次 bytes，
+已嵌入资产直接按 `assetId` 在 Rust 侧注册；后续请求只带 `sourceHandle`、完整 draft
+recipe、物理尺寸、离散代理精度、workspace revision 与 generation。方向归一像素和
+亮度表示由 `PreparedImage` 保存，旧 bytes 正式入口与 prepared 入口复用同一处理函数。
+
+draft 不进入 `AtelierDocument`。滑块中间值只更新本地 draft 和 read-only preview；
+`pointerup`/数值编辑结束才提交一次 `SetTreatmentRecipe`。导入取消释放临时 handle，
+不会改变 revision 或 undo history。每个 preview stream 只允许一个运行任务和一个最新
+pending，旧任务通过阶段/固定行块探针取消；检查器和画布再由有字节预算、引用计数的
+`ImageProxyBroker` 合并相同稳定键。
+
+画布拖动、缩放和旋转继续只改变 Konva 变换并复用上一张纹理；缩放停止 200 ms 后才在
+250/100/50/25 µm 离散档升级。`.pcba` 仍只保存原始资产、最终 recipe、mapping 和物理
+变换，prepared source、session、代理 PNG 与客户端纹理均为可重建派生数据。
+
 ### EasyEDA 交接等级
 
 本轮目标是生成嘉立创 EDA 可打开并继续检查的 `.eprj2` 工程。转换采用公开

@@ -631,6 +631,11 @@ test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", 
   page,
 }) => {
   const previewRequests: unknown[] = [];
+  const sourceRegistrations: unknown[] = [];
+  const recipeCommits: Array<{
+    treatmentId?: string;
+    recipe?: { threshold?: { mode?: string; value?: number } };
+  }> = [];
   const previewResponses: Array<{ error: string | null; revision?: number }> = [];
   page.on("request", (request) => {
     if (!request.url().endsWith("/__atelier_bridge")) return;
@@ -638,15 +643,26 @@ test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", 
       command?: string;
       args?: { request?: unknown };
     } | null;
-    if (payload?.command === "preview_image_import") {
+    if (payload?.command === "begin_image_preview_source") {
+      sourceRegistrations.push(payload.args?.request);
+    }
+    if (payload?.command === "request_image_preview") {
       previewRequests.push(payload.args?.request);
+    }
+    if (payload?.command === "set_treatment_recipe") {
+      recipeCommits.push(
+        (payload.args?.request ?? {}) as {
+          treatmentId?: string;
+          recipe?: { threshold?: { mode?: string; value?: number } };
+        },
+      );
     }
   });
   page.on("response", async (response) => {
     const request = response.request();
     if (!request.url().endsWith("/__atelier_bridge")) return;
     const payload = request.postDataJSON() as { command?: string } | null;
-    if (payload?.command !== "preview_image_import") return;
+    if (payload?.command !== "request_image_preview") return;
     previewResponses.push(
       (await response.json()) as { error: string | null; revision?: number },
     );
@@ -660,6 +676,7 @@ test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", 
   await expect(importer).toBeVisible();
   await expect(importer.getByText("原图", { exact: true })).toBeVisible();
   await expect(importer.getByText("处理结果", { exact: true })).toBeVisible();
+  await expect.poll(() => sourceRegistrations.length).toBe(1);
   expect(await readWorkspaceDocument(page)).toEqual(before);
   const confirm = importer.getByRole("button", { name: "确认处理并插入" });
   await expect(confirm).toBeEnabled();
@@ -677,6 +694,9 @@ test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", 
     "正在实时更新预览",
   );
   await expect.poll(() => previewRequests.length).toBe(1);
+  expect(previewRequests[0]).not.toHaveProperty("bytes");
+  expect(previewRequests[0]).toHaveProperty("sourceHandle");
+  expect(previewRequests[0]).toHaveProperty("generation");
   await expect.poll(() => previewResponses.length).toBe(1);
   expect(previewResponses[0]?.error).toBeNull();
   await expect(confirm).toBeEnabled();
@@ -704,6 +724,34 @@ test("Web 文件输入插入真实图片并参与当前生产层与 3D 预览", 
   await expect(
     treatmentEditor.getByRole("button", { name: "临时查看原图" }),
   ).toBeVisible();
+  const beforeOriginalToggle = await readWorkspaceDocument(page);
+  await treatmentEditor
+    .getByRole("button", { name: "临时查看原图" })
+    .click();
+  expect(await readWorkspaceDocument(page)).toEqual(beforeOriginalToggle);
+
+  recipeCommits.length = 0;
+  const threshold = treatmentEditor.getByRole("slider", {
+    name: "阈值 快速调节",
+  });
+  await threshold.fill("90");
+  await threshold.fill("120");
+  await threshold.fill("150");
+  await threshold.dispatchEvent("pointerup");
+  await expect.poll(() => recipeCommits.length).toBe(1);
+  expect(recipeCommits[0]?.recipe?.threshold).toEqual({
+    mode: "manual",
+    value: 150,
+  });
+
+  await treatmentEditor
+    .getByRole("button", { name: "重新自动估算阈值" })
+    .click();
+  await expect.poll(() => recipeCommits.length).toBe(2);
+  expect(recipeCommits[1]?.recipe?.threshold?.mode).toBe("manual");
+  expect(recipeCommits[1]?.recipe?.threshold?.value).toEqual(
+    expect.any(Number),
+  );
   expect(
     await page
       .getByTestId("workspace-inspector")

@@ -3,19 +3,21 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use atelier_core::{
-    AssetId, AssetReference, AtelierDocument, BoardOutline, CardSide, CombineMode, CommandHistory,
-    CommandOutcome, CompiledImageTreatment, ContentKind, ContentLayer, DocumentCommand,
-    DocumentDiagnostic, EasyedaHandoffExportReport, FaceProductionLayer, ImageProductionMode,
-    ImageTreatment, LayerId, LayerTransferMode, LayerTransform, ManufacturerProfileSnapshot,
-    MappingId, PreviewPalette, PreviewTexture, ProductionLayerPreviewTexture, ProductionMapping,
-    ProductionTarget, ProjectAssetCommand, ProjectAssetCommandOutcome, ProjectBundle,
-    ProjectBundleRasterizer, ResolvedFabricationBoard, SamplingPurpose, StackupPreset, TextContent,
-    TextLayout, TransformUm, TreatmentCompileRequest, TreatmentId, TreatmentRecipe,
-    build_production_trace, compile_fabrication_plan, compile_image_treatment,
-    export_easyeda_handoff, resolve_fabrication_plan, resolve_fabrication_plan_for_purpose,
+    AssetId, AssetReference, AtelierDocument, BoardOutline, ByteBudgetLru, CardSide, CombineMode,
+    CommandHistory, CommandOutcome, CompiledImageTreatment, ContentKind, ContentLayer,
+    DocumentCommand, DocumentDiagnostic, EasyedaHandoffExportReport, FaceProductionLayer,
+    ImageProductionMode, ImageTreatment, LayerId, LayerTransferMode, LayerTransform,
+    ManufacturerProfileSnapshot, MappingId, PreparedImage, PreviewPalette, PreviewTexture,
+    ProductionLayerPreviewTexture, ProductionMapping, ProductionTarget, ProjectAssetCommand,
+    ProjectAssetCommandOutcome, ProjectBundle, ProjectBundleRasterizer, ResolvedFabricationBoard,
+    SamplingPurpose, StackupPreset, TextContent, TextLayout, TransformUm, TreatmentCompileRequest,
+    TreatmentId, TreatmentRecipe, build_production_trace, compile_fabrication_plan,
+    compile_image_treatment, compile_prepared_image_with_cancel, export_easyeda_handoff,
+    prepare_image, resolve_fabrication_plan, resolve_fabrication_plan_for_purpose,
     system_font_families, treatment_cache_key,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -25,6 +27,7 @@ use image::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 
 mod processing_scheduler;
 
@@ -384,6 +387,35 @@ pub struct WorkspaceService {
     revision: u64,
     resolved_board_cache: Arc<Mutex<ResolvedBoardCache>>,
     treatment_scheduler: Arc<TreatmentProcessingScheduler>,
+    image_preview_runtime: Arc<Mutex<ImagePreviewRuntime>>,
+}
+
+const PREPARED_IMAGE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const IMAGE_PREVIEW_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+struct ImagePreviewSession {
+    prepared: Arc<PreparedImage>,
+    last_used: Instant,
+}
+
+struct ImagePreviewRuntime {
+    sessions: HashMap<TreatmentId, ImagePreviewSession>,
+    prepared: ByteBudgetLru<String, PreparedImage>,
+    source_bytes: u64,
+    prepare_count: u64,
+    proxy_compile_count: u64,
+}
+
+impl Default for ImagePreviewRuntime {
+    fn default() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            prepared: ByteBudgetLru::new(PREPARED_IMAGE_BUDGET_BYTES),
+            source_bytes: 0,
+            prepare_count: 0,
+            proxy_compile_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -405,6 +437,7 @@ impl WorkspaceService {
             revision: 0,
             resolved_board_cache: Arc::new(Mutex::new(ResolvedBoardCache::default())),
             treatment_scheduler: Arc::new(TreatmentProcessingScheduler::new(2)),
+            image_preview_runtime: Arc::new(Mutex::new(ImagePreviewRuntime::default())),
         }
     }
 
@@ -442,6 +475,7 @@ impl WorkspaceService {
             revision: self.revision,
             resolved_board_cache: Arc::clone(&self.resolved_board_cache),
             treatment_scheduler: Arc::clone(&self.treatment_scheduler),
+            image_preview_runtime: Arc::clone(&self.image_preview_runtime),
         }
     }
 
@@ -451,7 +485,10 @@ impl WorkspaceService {
             "get_board_preview"
                 | "get_production_preview"
                 | "compile_image_treatment"
-                | "preview_image_import"
+                | "begin_image_preview_source"
+                | "request_image_preview"
+                | "release_image_preview_source"
+                | "get_image_preview_diagnostics"
                 | "validate_manufacturer_profile"
                 | "get_production_trace"
         )
@@ -490,14 +527,18 @@ impl WorkspaceService {
             "get_workspace_document" => {
                 return serialize_response(self.session.document_view(), false);
             }
-            "open_project" => self
-                .session
-                .open_project(decode_request(&args)?)
-                .and_then(to_json),
-            "new_project" => self
-                .session
-                .new_project(decode_request(&args)?)
-                .and_then(to_json),
+            "open_project" => {
+                self.clear_image_preview_runtime()?;
+                self.session
+                    .open_project(decode_request(&args)?)
+                    .and_then(to_json)
+            }
+            "new_project" => {
+                self.clear_image_preview_runtime()?;
+                self.session
+                    .new_project(decode_request(&args)?)
+                    .and_then(to_json)
+            }
             "save_project" => {
                 self.session.save_project(decode_request(&args)?)?;
                 return serialize_response(self.session.document_view(), false);
@@ -568,11 +609,24 @@ impl WorkspaceService {
             "compile_image_treatment" => {
                 return serialize_response(self.compile_treatment(decode_request(&args)?)?, false);
             }
-            "preview_image_import" => {
+            "begin_image_preview_source" => {
                 return serialize_response(
-                    self.preview_image_import(decode_request(&args)?)?,
+                    self.begin_image_preview_source(decode_request(&args)?)?,
                     false,
                 );
+            }
+            "request_image_preview" => {
+                return serialize_response(
+                    self.request_image_preview(decode_request(&args)?)?,
+                    false,
+                );
+            }
+            "release_image_preview_source" => {
+                self.release_image_preview_source(decode_request(&args)?)?;
+                return serialize_response((), false);
+            }
+            "get_image_preview_diagnostics" => {
+                return serialize_response(self.image_preview_diagnostics()?, false);
             }
             "confirm_image_import" => self
                 .session
@@ -799,8 +853,9 @@ impl WorkspaceService {
         };
         let recipe_fingerprint = treatment.recipe.fingerprint();
         let key = TreatmentJobKey {
-            treatment_id: treatment.id,
-            revision: self.revision,
+            stream_id: format!("treatment:{}", treatment.id),
+            generation: self.revision,
+            workspace_revision: self.revision,
             recipe_fingerprint: recipe_fingerprint.clone(),
             cache_key: treatment_cache_key(
                 &asset.sha256,
@@ -813,7 +868,7 @@ impl WorkspaceService {
         let recipe = treatment.recipe;
         let compiled = self
             .treatment_scheduler
-            .compile(key, move || {
+            .compile(key, move |_| {
                 compile_image_treatment(&bytes, &recipe, compile_request)
                     .map_err(|error| error.to_string())
             })
@@ -829,48 +884,200 @@ impl WorkspaceService {
         TreatmentCompileView::from_compiled(&compiled)
     }
 
-    fn preview_image_import(
+    fn begin_image_preview_source(
         &self,
-        request: PreviewImageImportRequest,
-    ) -> Result<TreatmentCompileView, String> {
-        let compile_request = TreatmentCompileRequest::for_purpose(
-            request.physical_width_um,
-            request.physical_height_um,
-            self.revision.saturating_add(request.draft_revision),
-            SamplingPurpose::InteractiveProxy,
+        request: BeginImagePreviewSourceRequest,
+    ) -> Result<BeginImagePreviewSourceView, String> {
+        let (bytes, media_type, transferred_bytes) = match (request.bytes, request.asset_id) {
+            (Some(bytes), None) => (
+                bytes,
+                request
+                    .media_type
+                    .ok_or_else(|| "mediaType is required with preview source bytes".to_owned())?,
+                true,
+            ),
+            (None, Some(asset_id)) => {
+                let asset = self
+                    .session
+                    .bundle
+                    .document
+                    .assets
+                    .iter()
+                    .find(|asset| asset.id == asset_id)
+                    .ok_or_else(|| format!("asset not found: {asset_id}"))?;
+                (
+                    self.session
+                        .bundle
+                        .asset_bytes(asset_id)
+                        .ok_or_else(|| format!("asset bytes not found: {asset_id}"))?
+                        .to_vec(),
+                    asset.media_type.clone(),
+                    false,
+                )
+            }
+            _ => {
+                return Err(
+                    "begin image preview requires exactly one of bytes or assetId".to_owned(),
+                );
+            }
+        };
+        let source_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+        let mut runtime = self
+            .image_preview_runtime
+            .lock()
+            .map_err(|_| "image preview runtime lock is poisoned".to_owned())?;
+        runtime.expire_idle_sessions();
+        let prepared = if let Some(prepared) = runtime.prepared.get(&source_sha256) {
+            prepared
+        } else {
+            let prepared = Arc::new(prepare_image(&bytes).map_err(|error| error.to_string())?);
+            if prepared.estimated_bytes() > runtime.prepared.budget_bytes() {
+                return Err(format!(
+                    "image preview source needs {} bytes but the prepared-image budget is {} bytes",
+                    prepared.estimated_bytes(),
+                    runtime.prepared.budget_bytes()
+                ));
+            }
+            runtime.prepare_count = runtime.prepare_count.saturating_add(1);
+            let inserted = runtime.prepared.insert(
+                source_sha256.clone(),
+                Arc::clone(&prepared),
+                prepared.estimated_bytes(),
+            );
+            if !inserted {
+                return Err("image preview source exceeds the prepared-image budget".to_owned());
+            }
+            prepared
+        };
+        if transferred_bytes {
+            runtime.source_bytes = runtime.source_bytes.saturating_add(bytes.len() as u64);
+        }
+        let source_handle = TreatmentId::new();
+        runtime.sessions.insert(
+            source_handle,
+            ImagePreviewSession {
+                prepared: Arc::clone(&prepared),
+                last_used: Instant::now(),
+            },
         );
+        Ok(BeginImagePreviewSourceView {
+            source_handle,
+            source_sha256,
+            width_px: prepared.width_px(),
+            height_px: prepared.height_px(),
+            media_type,
+            workspace_revision: self.revision,
+        })
+    }
+
+    fn request_image_preview(
+        &self,
+        request: RequestImagePreviewRequest,
+    ) -> Result<TreatmentCompileView, String> {
+        if request.workspace_revision > self.revision {
+            return Err(format!(
+                "image preview workspace revision {} is ahead of current revision {}",
+                request.workspace_revision, self.revision
+            ));
+        }
+        let prepared = {
+            let mut runtime = self
+                .image_preview_runtime
+                .lock()
+                .map_err(|_| "image preview runtime lock is poisoned".to_owned())?;
+            runtime.expire_idle_sessions();
+            let session = runtime
+                .sessions
+                .get_mut(&request.source_handle)
+                .ok_or_else(|| "image preview source handle is missing or expired".to_owned())?;
+            session.last_used = Instant::now();
+            Arc::clone(&session.prepared)
+        };
+        let compile_request = TreatmentCompileRequest {
+            physical_width_um: request.physical_width_um,
+            physical_height_um: request.physical_height_um,
+            pixel_pitch_um: request.pixel_pitch_um,
+            revision: self.revision,
+            purpose: SamplingPurpose::InteractiveProxy,
+        };
         let recipe_fingerprint = request.recipe.fingerprint();
         let key = TreatmentJobKey {
-            treatment_id: request.draft_id,
-            revision: compile_request.revision,
+            stream_id: format!("{}:{}", request.source_handle, request.preview_stream_id),
+            generation: request.generation,
+            workspace_revision: self.revision,
             recipe_fingerprint: recipe_fingerprint.clone(),
-            cache_key: format!(
-                "draft:{}:{}:{}:{}:{}",
-                request.draft_id,
-                request.bytes.len(),
+            cache_key: treatment_cache_key(
+                prepared.source_sha256(),
+                &request.recipe,
                 request.physical_width_um,
                 request.physical_height_um,
-                recipe_fingerprint,
+                request.pixel_pitch_um,
             ),
         };
-        let bytes = request.bytes;
         let recipe = request.recipe;
         let compiled = self
             .treatment_scheduler
-            .compile(key, move || {
-                compile_image_treatment(&bytes, &recipe, compile_request)
-                    .map_err(|error| error.to_string())
+            .compile(key, move |token| {
+                compile_prepared_image_with_cancel(&prepared, &recipe, compile_request, || {
+                    token.is_cancelled()
+                })
+                .map_err(|error| error.to_string())
             })
             .map_err(|error| match error {
                 TreatmentJobError::Cancelled => {
-                    "image import preview was cancelled by a newer recipe".to_owned()
+                    "image preview was cancelled by a newer generation".to_owned()
                 }
                 TreatmentJobError::Stale => {
-                    "image import preview is stale and was discarded".to_owned()
+                    "image preview result is stale and was discarded".to_owned()
                 }
                 TreatmentJobError::Failed(message) => message,
             })?;
+        self.image_preview_runtime
+            .lock()
+            .map_err(|_| "image preview runtime lock is poisoned".to_owned())?
+            .proxy_compile_count += 1;
         TreatmentCompileView::from_compiled(&compiled)
+    }
+
+    fn release_image_preview_source(
+        &self,
+        request: ReleaseImagePreviewSourceRequest,
+    ) -> Result<(), String> {
+        self.image_preview_runtime
+            .lock()
+            .map_err(|_| "image preview runtime lock is poisoned".to_owned())?
+            .sessions
+            .remove(&request.source_handle);
+        Ok(())
+    }
+
+    fn image_preview_diagnostics(&self) -> Result<ImagePreviewDiagnosticsView, String> {
+        let runtime = self
+            .image_preview_runtime
+            .lock()
+            .map_err(|_| "image preview runtime lock is poisoned".to_owned())?;
+        let scheduler = self.treatment_scheduler.diagnostics();
+        Ok(ImagePreviewDiagnosticsView {
+            source_bytes: runtime.source_bytes,
+            prepare_count: runtime.prepare_count,
+            proxy_compile_count: runtime.proxy_compile_count,
+            active_sessions: runtime.sessions.len(),
+            prepared_resident_bytes: runtime.prepared.resident_bytes(),
+            coalesce_count: scheduler.coalesce_count,
+            cancel_count: scheduler.cancel_count,
+            active: scheduler.active,
+            pending: scheduler.pending,
+        })
+    }
+
+    fn clear_image_preview_runtime(&self) -> Result<(), String> {
+        let mut runtime = self
+            .image_preview_runtime
+            .lock()
+            .map_err(|_| "image preview runtime lock is poisoned".to_owned())?;
+        runtime.sessions.clear();
+        runtime.prepared.clear();
+        Ok(())
     }
 
     fn production_trace(&self) -> Result<atelier_core::ProductionTraceReport, String> {
@@ -880,6 +1087,15 @@ impl WorkspaceService {
             &self.session.bundle.document,
             &resolved,
         ))
+    }
+}
+
+impl ImagePreviewRuntime {
+    fn expire_idle_sessions(&mut self) {
+        let now = Instant::now();
+        self.sessions.retain(|_, session| {
+            now.saturating_duration_since(session.last_used) < IMAGE_PREVIEW_IDLE_TIMEOUT
+        });
     }
 }
 
@@ -1808,14 +2024,58 @@ struct CompileTreatmentRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BeginImagePreviewSourceRequest {
+    #[serde(default)]
+    bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    asset_id: Option<AssetId>,
+    #[serde(default)]
+    media_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PreviewImageImportRequest {
-    draft_id: TreatmentId,
-    draft_revision: u64,
-    bytes: Vec<u8>,
+struct BeginImagePreviewSourceView {
+    source_handle: TreatmentId,
+    source_sha256: String,
+    width_px: u32,
+    height_px: u32,
+    media_type: String,
+    workspace_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestImagePreviewRequest {
+    source_handle: TreatmentId,
+    preview_stream_id: String,
+    generation: u64,
+    workspace_revision: u64,
     recipe: TreatmentRecipe,
     physical_width_um: u32,
     physical_height_um: u32,
+    pixel_pitch_um: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReleaseImagePreviewSourceRequest {
+    source_handle: TreatmentId,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImagePreviewDiagnosticsView {
+    source_bytes: u64,
+    prepare_count: u64,
+    proxy_compile_count: u64,
+    active_sessions: usize,
+    prepared_resident_bytes: usize,
+    coalesce_count: u64,
+    cancel_count: u64,
+    active: usize,
+    pending: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3525,6 +3785,22 @@ mod tests {
         assert_eq!(imported.revision, 1);
         assert_eq!(imported.payload["reused"], false);
         let asset_id = imported.payload["assetId"].clone();
+        let embedded_preview = invoke(
+            &mut service,
+            "begin_image_preview_source",
+            serde_json::json!({ "request": { "assetId": asset_id.clone() } }),
+        );
+        assert_eq!(embedded_preview.error, None);
+        assert_eq!(embedded_preview.payload["mediaType"], "image/png");
+        let preview_diagnostics = invoke(
+            &mut service,
+            "get_image_preview_diagnostics",
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            preview_diagnostics.payload["sourceBytes"], 0,
+            "embedded assets must not cross the frontend bridge again"
+        );
 
         let inserted_treatment = invoke(
             &mut service,
@@ -3652,17 +3928,29 @@ mod tests {
             args: serde_json::json!({}),
         });
 
-        let preview = service.invoke(super::WorkspaceBridgeRequest {
+        let begun = service.invoke(super::WorkspaceBridgeRequest {
             contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
-            command: "preview_image_import".to_owned(),
+            command: "begin_image_preview_source".to_owned(),
             args: serde_json::json!({
                 "request": {
-                    "draftId": atelier_core::TreatmentId::new(),
-                    "draftRevision": 1,
                     "bytes": bytes.clone(),
+                    "mediaType": "image/png"
+                }
+            }),
+        });
+        let preview = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "request_image_preview".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "sourceHandle": begun.payload["sourceHandle"],
+                    "previewStreamId": "atomic-import",
+                    "generation": 1,
+                    "workspaceRevision": 0,
                     "recipe": recipe.clone(),
                     "physicalWidthUm": 10_000,
-                    "physicalHeightUm": 10_000
+                    "physicalHeightUm": 10_000,
+                    "pixelPitchUm": 250
                 }
             }),
         });
@@ -3738,6 +4026,97 @@ mod tests {
         for field in ["assets", "imageTreatments", "frontLayers", "mappings"] {
             assert_eq!(undone.payload[field].as_array().map(Vec::len), Some(0));
         }
+    }
+
+    #[test]
+    fn preview_source_is_registered_once_requested_by_handle_and_released_without_document_changes()
+    {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(8, 8)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode PNG");
+        let bytes = png.into_inner();
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "Preview session",
+            20_000,
+            20_000,
+        ));
+        let invoke =
+            |service: &mut super::WorkspaceService, command: &str, args: serde_json::Value| {
+                service.invoke(super::WorkspaceBridgeRequest {
+                    contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+                    command: command.to_owned(),
+                    args,
+                })
+            };
+        let before = invoke(
+            &mut service,
+            "get_workspace_document",
+            serde_json::json!({}),
+        );
+        let begun = invoke(
+            &mut service,
+            "begin_image_preview_source",
+            serde_json::json!({
+                "request": {
+                    "bytes": bytes,
+                    "mediaType": "image/png"
+                }
+            }),
+        );
+        assert_eq!(begun.error, None);
+        assert_eq!(begun.revision, 0);
+        assert_eq!(begun.payload["widthPx"], 8);
+        let source_handle = begun.payload["sourceHandle"].clone();
+
+        for generation in 1..=2 {
+            let preview = invoke(
+                &mut service,
+                "request_image_preview",
+                serde_json::json!({
+                    "request": {
+                        "sourceHandle": source_handle,
+                        "previewStreamId": "inspector",
+                        "generation": generation,
+                        "workspaceRevision": 0,
+                        "recipe": atelier_core::TreatmentRecipe::default(),
+                        "physicalWidthUm": 10_000,
+                        "physicalHeightUm": 10_000,
+                        "pixelPitchUm": 250
+                    }
+                }),
+            );
+            assert_eq!(preview.error, None);
+            assert_eq!(preview.payload["purpose"], "interactiveProxy");
+        }
+        let diagnostics = invoke(
+            &mut service,
+            "get_image_preview_diagnostics",
+            serde_json::json!({}),
+        );
+        assert_eq!(diagnostics.payload["prepareCount"], 1);
+        assert_eq!(diagnostics.payload["proxyCompileCount"], 2);
+        assert_eq!(diagnostics.payload["activeSessions"], 1);
+
+        let released = invoke(
+            &mut service,
+            "release_image_preview_source",
+            serde_json::json!({ "request": { "sourceHandle": source_handle } }),
+        );
+        assert_eq!(released.error, None);
+        let after = invoke(
+            &mut service,
+            "get_workspace_document",
+            serde_json::json!({}),
+        );
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.payload, before.payload);
+        let diagnostics = invoke(
+            &mut service,
+            "get_image_preview_diagnostics",
+            serde_json::json!({}),
+        );
+        assert_eq!(diagnostics.payload["activeSessions"], 0);
     }
 
     #[test]

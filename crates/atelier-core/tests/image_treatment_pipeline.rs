@@ -3,7 +3,7 @@ use std::io::Cursor;
 use atelier_core::{
     AlphaMode, CropRect, SamplingPurpose, ThinFeaturePolicy, ThresholdMode, TreatmentCompileError,
     TreatmentCompileRequest, TreatmentDiagnostic, TreatmentRecipe, compile_image_treatment,
-    treatment_cache_key,
+    compile_prepared_image, compile_prepared_image_with_cancel, prepare_image, treatment_cache_key,
 };
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 
@@ -21,6 +21,44 @@ fn fixture_png() -> Vec<u8> {
         .write_to(&mut bytes, ImageFormat::Png)
         .expect("fixture PNG");
     bytes.into_inner()
+}
+
+#[test]
+fn prepared_source_matches_the_bytes_entry_and_can_be_cancelled() {
+    let bytes = fixture_png();
+    let recipe = TreatmentRecipe::default();
+    let request =
+        TreatmentCompileRequest::for_purpose(51_170, 80_000, 7, SamplingPurpose::InteractiveProxy);
+    let prepared = prepare_image(&bytes).expect("prepare source once");
+    let from_bytes = compile_image_treatment(&bytes, &recipe, request).expect("bytes entry");
+    let from_prepared =
+        compile_prepared_image(&prepared, &recipe, request).expect("prepared entry");
+
+    assert_eq!(from_prepared, from_bytes);
+    assert_eq!(prepared.source_sha256().len(), 64);
+    assert!(prepared.estimated_bytes() > 0);
+
+    let mut probes = 0;
+    let cancelled = compile_prepared_image_with_cancel(&prepared, &recipe, request, || {
+        probes += 1;
+        probes >= 2
+    });
+    assert!(matches!(cancelled, Err(TreatmentCompileError::Cancelled)));
+    assert_eq!(
+        compile_prepared_image(&prepared, &recipe, request).expect("deterministic retry"),
+        from_bytes
+    );
+}
+
+#[test]
+fn otsu_recipe_fingerprint_matches_the_web_contract() {
+    let mut recipe = TreatmentRecipe::default();
+    recipe.threshold = ThresholdMode::Otsu;
+    recipe.smoothing_radius_um = 500;
+    assert_eq!(
+        recipe.fingerprint(),
+        "125c4247000170252ef09a847fe1b53b76d80ad3ca3bdfa38a6632a919629156"
+    );
 }
 
 fn encode_png(image: RgbaImage) -> Vec<u8> {

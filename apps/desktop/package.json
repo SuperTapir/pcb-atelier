@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "benchmark:konva": "node scripts/run-konva-benchmark.mjs",
     "benchmark:konva:tauri": "node scripts/run-tauri-konva-benchmark.mjs",
+    "benchmark:interactive-image": "node scripts/run-interactive-image-benchmark.mjs",
     "benchmark:konva:ui": "vite --host 127.0.0.1 --port 1422 --strictPort",
     "test": "vitest run src",
     "test:e2e": "npm run build && npm run verify:e2e-production-guard && playwright test",

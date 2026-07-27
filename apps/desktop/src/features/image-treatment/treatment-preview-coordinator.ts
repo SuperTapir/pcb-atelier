@@ -10,8 +10,10 @@ export interface TreatmentPreviewAccepted {
 
 export interface TreatmentPreviewCoordinatorOptions {
   debounceMs?: number;
-  persistRecipe: (recipe: TreatmentRecipe) => Promise<unknown>;
-  compileInteractiveProxy: () => Promise<TreatmentCompileReport>;
+  compileInteractiveProxy: (
+    recipe: TreatmentRecipe,
+    generation: number,
+  ) => Promise<TreatmentCompileReport>;
   fingerprint?: (recipe: TreatmentRecipe) => Promise<string>;
   onAccepted: (result: TreatmentPreviewAccepted) => void;
   onError?: (error: unknown) => void;
@@ -60,18 +62,20 @@ export class TreatmentPreviewCoordinator {
       )(recipe);
       if (!this.isCurrent(generation)) return;
 
-      await this.options.persistRecipe(recipe);
-      if (!this.isCurrent(generation)) return;
-
-      const report = await this.options.compileInteractiveProxy();
+      const report = await this.options.compileInteractiveProxy(
+        recipe,
+        generation,
+      );
       if (!this.isCurrent(generation)) return;
       if (report.purpose !== "interactiveProxy") {
         throw new Error("图片处理预览返回了错误的采样用途");
       }
       if (report.recipeFingerprint !== expectedFingerprint) {
-        throw new Error("图片处理预览配方指纹与当前参数不一致");
+        throw new Error(
+          `图片处理预览配方指纹与当前参数不一致：expected ${expectedFingerprint}, received ${report.recipeFingerprint}`,
+        );
       }
-      if (report.revision <= this.latestAcceptedRevision) {
+      if (report.revision < this.latestAcceptedRevision) {
         throw new Error("图片处理预览返回了陈旧 revision");
       }
 
@@ -90,7 +94,20 @@ export class TreatmentPreviewCoordinator {
 export async function fingerprintTreatmentRecipe(
   recipe: TreatmentRecipe,
 ): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(recipe));
+  const canonical = {
+    algorithmVersion: recipe.algorithmVersion,
+    alphaMode: recipe.alphaMode,
+    threshold: recipe.threshold,
+    invert: recipe.invert,
+    smoothingRadiusUm: recipe.smoothingRadiusUm,
+    despeckleRadiusUm: recipe.despeckleRadiusUm,
+    removeIslandsBelowUm2: recipe.removeIslandsBelowUm2,
+    minimumLineWidthUm: recipe.minimumLineWidthUm,
+    thinFeaturePolicy: recipe.thinFeaturePolicy,
+    minimumGapUm: recipe.minimumGapUm,
+    crop: recipe.crop,
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(canonical));
   const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))

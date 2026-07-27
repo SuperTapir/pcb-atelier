@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ImageTreatmentEditor } from "@/features/image-treatment/ImageTreatmentEditor";
 import {
+  beginImagePreviewSource,
   confirmImageImport,
-  previewImageImport,
+  releaseImagePreviewSource,
+  requestImagePreview,
   type ConfirmedImageImport,
   type ImageProductionMode,
   type ProductionLayer,
@@ -64,8 +66,14 @@ export function ImageImportDialog({
   const [report, setReport] = useState<TreatmentCompileReport | null>(null);
   const [confirming, setConfirming] = useState(false);
   const compileRecipe = useRef(recipe);
-  const draftRevision = useRef(0);
   const previewGeneration = useRef(0);
+  const previewSourceRef = useRef<ReturnType<
+    typeof beginImagePreviewSource
+  > | null>(null);
+  const previewSourceUsers = useRef(0);
+  const [previewSource, setPreviewSource] = useState<ReturnType<
+    typeof beginImagePreviewSource
+  > | null>(null);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const originalPreviewUrl = useMemo(
@@ -80,23 +88,56 @@ export function ImageImportDialog({
     () => () => URL.revokeObjectURL(originalPreviewUrl),
     [originalPreviewUrl],
   );
+  useEffect(() => {
+    previewSourceUsers.current += 1;
+    const source =
+      previewSourceRef.current ??
+      beginImagePreviewSource({
+        bytes: draft.bytes,
+        mediaType: draft.mediaType,
+      });
+    previewSourceRef.current = source;
+    setPreviewSource(source);
+    return () => {
+      previewSourceUsers.current -= 1;
+      queueMicrotask(() => {
+        if (
+          previewSourceUsers.current === 0 &&
+          previewSourceRef.current === source
+        ) {
+          previewSourceRef.current = null;
+          void source
+            .then(({ sourceHandle }) =>
+              releaseImagePreviewSource(sourceHandle),
+            )
+            .catch(() => undefined);
+        }
+      });
+    };
+  }, [draft.bytes, draft.mediaType]);
 
   const compileDraft = useCallback(
-    () =>
-      previewImageImport({
-        draftId: draft.draftId,
-        draftRevision: ++draftRevision.current,
-        bytes: draft.bytes,
-        recipe: compileRecipe.current,
+    (nextRecipe = compileRecipe.current) =>
+      previewSource
+        ? previewSource.then((source) =>
+        requestImagePreview({
+        sourceHandle: source.sourceHandle,
+        previewStreamId: `import:${draft.draftId}`,
+        generation: ++previewGeneration.current,
+        workspaceRevision: source.workspaceRevision,
+        recipe: nextRecipe,
         physicalWidthUm: draft.physicalWidthUm,
         physicalHeightUm: draft.physicalHeightUm,
-      }),
-    [draft],
+        pixelPitchUm: 250,
+      }))
+        : Promise.reject(new Error("图片预览源尚未注册")),
+    [draft.draftId, draft.physicalHeightUm, draft.physicalWidthUm, previewSource],
   );
 
   useEffect(() => {
+    if (!previewSource) return;
     let active = true;
-    const generation = ++previewGeneration.current;
+    const generation = previewGeneration.current + 1;
     void compileDraft()
       .then((nextReport) => {
         if (active && previewGeneration.current === generation) {
@@ -111,7 +152,7 @@ export function ImageImportDialog({
     return () => {
       active = false;
     };
-  }, [compileDraft, draft.draftId]);
+  }, [compileDraft, draft.draftId, previewSource]);
 
   const persistDraftRecipe = useCallback(async (nextRecipe: TreatmentRecipe) => {
     compileRecipe.current = nextRecipe;

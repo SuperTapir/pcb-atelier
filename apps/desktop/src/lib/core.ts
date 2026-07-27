@@ -336,15 +336,6 @@ export interface TreatmentMutation {
   treatmentId: string;
 }
 
-export interface ImageImportDraftInput {
-  draftId: string;
-  draftRevision: number;
-  bytes: number[];
-  recipe: TreatmentRecipe;
-  physicalWidthUm: number;
-  physicalHeightUm: number;
-}
-
 export interface ConfirmImageImportInput {
   side: "front" | "back";
   layer: ProductionLayer;
@@ -385,6 +376,27 @@ export interface TreatmentCompileReport {
   purpose: SamplingPurpose;
   topology: { islandCount: number; holeCount: number };
   diagnostics: Array<Record<string, unknown>>;
+}
+
+export interface ImagePreviewSource {
+  sourceHandle: string;
+  sourceSha256: string;
+  widthPx: number;
+  heightPx: number;
+  mediaType: string;
+  workspaceRevision: number;
+}
+
+export interface ImagePreviewDiagnostics {
+  sourceBytes: number;
+  prepareCount: number;
+  proxyCompileCount: number;
+  activeSessions: number;
+  preparedResidentBytes: number;
+  coalesceCount: number;
+  cancelCount: number;
+  active: number;
+  pending: number;
 }
 
 export interface ManufacturerValidation {
@@ -688,12 +700,41 @@ export function compileImageTreatment(
   });
 }
 
-export function previewImageImport(
-  request: ImageImportDraftInput,
-): Promise<TreatmentCompileReport> {
-  return invokeCore<TreatmentCompileReport>("preview_image_import", {
+export function beginImagePreviewSource(request: {
+  bytes?: number[];
+  assetId?: string;
+  mediaType?: string;
+}): Promise<ImagePreviewSource> {
+  return invokeCore<ImagePreviewSource>("begin_image_preview_source", {
     request,
   });
+}
+
+export function requestImagePreview(request: {
+  sourceHandle: string;
+  previewStreamId: string;
+  generation: number;
+  workspaceRevision: number;
+  recipe: TreatmentRecipe;
+  physicalWidthUm: number;
+  physicalHeightUm: number;
+  pixelPitchUm: number;
+}): Promise<TreatmentCompileReport> {
+  return invokeCore<TreatmentCompileReport>("request_image_preview", {
+    request,
+  });
+}
+
+export function releaseImagePreviewSource(
+  sourceHandle: string,
+): Promise<void> {
+  return invokeCore<void>("release_image_preview_source", {
+    request: { sourceHandle },
+  });
+}
+
+export function getImagePreviewDiagnostics(): Promise<ImagePreviewDiagnostics> {
+  return invokeCore<ImagePreviewDiagnostics>("get_image_preview_diagnostics");
 }
 
 export function confirmImageImport(

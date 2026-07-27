@@ -1,4 +1,5 @@
 pub mod atomic;
+pub mod byte_lru;
 pub mod command;
 pub mod document;
 pub mod easyeda;
@@ -15,6 +16,7 @@ pub mod project;
 pub mod revision;
 
 pub use atomic::*;
+pub use byte_lru::*;
 pub use command::*;
 pub use document::*;
 pub use easyeda::*;

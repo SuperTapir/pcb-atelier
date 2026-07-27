@@ -37,6 +37,10 @@ import {
 } from "@/features/workspace/geometry-edit";
 import { getTextRenderFrame } from "@/features/workspace/text-render-frame";
 import {
+  getImageProxyKey,
+  treatmentProxyBroker,
+} from "@/features/image-treatment/image-proxy-broker";
+import {
   MAX_ZOOM,
   MIN_ZOOM,
   type CanvasViewport,
@@ -49,7 +53,6 @@ import {
   getAssetBytes,
   type ContentLayer,
   type ImageTreatment,
-  type TreatmentCompileReport,
   type WorkspaceDocument,
 } from "@/lib/core";
 
@@ -63,12 +66,6 @@ const WHEEL_ZOOM_SENSITIVITY: Record<WheelZoomDamping, number> = {
   medium: 0.0007,
   low: 0.001,
 };
-const interactiveProxyReportCache = new Map<
-  string,
-  Promise<TreatmentCompileReport>
->();
-const MAX_INTERACTIVE_PROXY_CACHE_ENTRIES = 128;
-
 interface WorkspaceCanvasProps {
   aspectRatioLocked: boolean;
   document: WorkspaceDocument;
@@ -305,7 +302,15 @@ export function WorkspaceCanvas({
     end: Point;
   } | null>(null);
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
-  const proxyPixelPitchUm = getAdaptiveProxyPixelPitchUm(viewport.zoom);
+  const [proxyPixelPitchUm, setProxyPixelPitchUm] = useState(() =>
+    getAdaptiveProxyPixelPitchUm(viewport.zoom),
+  );
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setProxyPixelPitchUm(getAdaptiveProxyPixelPitchUm(viewport.zoom));
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [viewport.zoom]);
   const assetImages = useProductionProxyImages(
     document,
     layers,
@@ -1222,6 +1227,7 @@ function useProductionProxyImages(
   useEffect(() => {
     let cancelled = false;
     const urls: string[] = [];
+    const proxyReleases: Array<() => void> = [];
     const palette = getManufacturerPalette(document.manufacturerProfile);
     void Promise.all(
       layers
@@ -1279,12 +1285,14 @@ function useProductionProxyImages(
               : mapping?.target.layer === "solderMaskOpen"
                 ? palette.substrate
                 : palette.silkscreen;
-          const report = await getCachedInteractiveProxy(
+          const proxy = getCachedInteractiveProxy(
             treatment,
             layer.transform.widthUm,
             layer.transform.heightUm,
             pixelPitchUm,
           );
+          proxyReleases.push(proxy.release);
+          const report = await proxy.value;
           return [
             layer.id,
             await loadTintedMask(report.previewPngDataUrl, tint),
@@ -1312,6 +1320,7 @@ function useProductionProxyImages(
     return () => {
       cancelled = true;
       urls.forEach((url) => URL.revokeObjectURL(url));
+      proxyReleases.forEach((release) => release());
     };
   }, [
     document.assets,
@@ -1333,15 +1342,12 @@ export function getInteractiveProxyCacheKey(
   heightUm: number,
   pixelPitchUm = 250,
 ) {
-  return JSON.stringify([
-    treatment.id,
-    treatment.assetId,
-    treatment.productionMode,
-    treatment.recipe,
+  return getImageProxyKey(
+    treatment,
     widthUm,
     heightUm,
     pixelPitchUm,
-  ]);
+  );
 }
 
 export function getAdaptiveProxyPixelPitchUm(zoom: number): number {
@@ -1361,24 +1367,15 @@ function getCachedInteractiveProxy(
     heightUm,
     pixelPitchUm,
   );
-  const cached = interactiveProxyReportCache.get(key);
-  if (cached) return cached;
-  const request = compileImageTreatment(
-    treatment.id,
-    widthUm,
-    heightUm,
-    "interactiveProxy",
-    pixelPitchUm,
-  ).catch((error) => {
-    interactiveProxyReportCache.delete(key);
-    throw error;
-  });
-  interactiveProxyReportCache.set(key, request);
-  if (interactiveProxyReportCache.size > MAX_INTERACTIVE_PROXY_CACHE_ENTRIES) {
-    const oldestKey = interactiveProxyReportCache.keys().next().value;
-    if (oldestKey) interactiveProxyReportCache.delete(oldestKey);
-  }
-  return request;
+  return treatmentProxyBroker.acquire(key, () =>
+    compileImageTreatment(
+      treatment.id,
+      widthUm,
+      heightUm,
+      "interactiveProxy",
+      pixelPitchUm,
+    ),
+  );
 }
 
 async function cropOriginalImage(
