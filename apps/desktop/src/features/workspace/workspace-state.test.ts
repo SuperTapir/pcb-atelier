@@ -6,6 +6,16 @@ import {
 } from "@/features/workspace/workspace-state";
 
 describe("workspaceReducer", () => {
+  it("defaults dual boards to the persisted horizontal preference", () => {
+    expect(createInitialWorkspaceState().boardArrangement).toBe("horizontal");
+    expect(createInitialWorkspaceState("vertical").boardArrangement).toBe(
+      "vertical",
+    );
+    expect(createInitialWorkspaceState("horizontal", "focus").editLayout).toBe(
+      "focus",
+    );
+  });
+
   it("keeps workspace mode, edit layout, active face and tool orthogonal", () => {
     const state = [
       { type: "setWorkspaceMode", workspaceMode: "preview" } as const,
@@ -25,7 +35,7 @@ describe("workspaceReducer", () => {
     expect(state.tool).toBe("text");
   });
 
-  it("changes board arrangement without losing either face state", () => {
+  it("recenters pixel-space pan when arrangement changes without losing zoom or selection", () => {
     let state = createInitialWorkspaceState();
     state = workspaceReducer(state, {
       type: "setSelection",
@@ -46,8 +56,8 @@ describe("workspaceReducer", () => {
     expect(state.selections.front).toEqual(["front-title"]);
     expect(state.viewports.back).toEqual({
       zoom: 1.4,
-      panX: 20,
-      panY: -10,
+      panX: 0,
+      panY: 0,
     });
   });
 

@@ -4,12 +4,20 @@ export function getTextRenderFrame(
   height: number,
 ) {
   if (layout === "autoWidth") {
-    return { wrap: "none" as const };
+    return {
+      align: "center" as const,
+      width,
+      height,
+      verticalAlign: "middle" as const,
+      wrap: "none" as const,
+    };
   }
 
   return {
+    align: "center" as const,
     width,
     height,
+    verticalAlign: "middle" as const,
     wrap: "word" as const,
   };
 }

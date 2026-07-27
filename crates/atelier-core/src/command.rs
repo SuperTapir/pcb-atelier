@@ -1,16 +1,22 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AtelierDocument, BoardFillContent, BoardOutline, CardFace, CardSide, ContentKind, ContentLayer,
-    DocumentDiagnostic, DocumentError, FaceProductionLayer, ImageContent, LayerId, MappingId,
-    ProductionMapping, StackupPreset, TextContent, TransformUm,
+    AssetId, AssetReference, AtelierDocument, BoardFillContent, BoardOutline, CardFace, CardSide,
+    ContentKind, ContentLayer, DocumentDiagnostic, DocumentError, FaceProductionLayer,
+    ImageContent, ImageProductionMode, ImageTreatment, LayerId, ManufacturerProfileSnapshot,
+    MappingId, ProductionMapping, ProductionTarget, StackupPreset, TextContent, TransformUm,
+    TreatmentId, TreatmentRecipe,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "camelCase")]
+// Commands intentionally own complete snapshots so serialization and
+// undo/redo remain atomic; boxing selected variants would only move this cost
+// to heap allocation without reducing history payloads.
+#[allow(clippy::large_enum_variant)]
 pub enum DocumentCommand {
     InsertLayer {
         side: CardSide,
@@ -20,9 +26,21 @@ pub enum DocumentCommand {
     DeleteLayer {
         layer_id: LayerId,
     },
+    DeleteLayers {
+        layer_ids: Vec<LayerId>,
+    },
+    DuplicateLayer {
+        layer_id: LayerId,
+        duplicate_layer_id: LayerId,
+        duplicate_mapping_ids: Vec<MappingId>,
+        offset_um: i64,
+    },
     TransformLayer {
         layer_id: LayerId,
         transform: TransformUm,
+    },
+    TransformLayers {
+        transforms: Vec<LayerTransform>,
     },
     SetLayerLock {
         layer_id: LayerId,
@@ -44,6 +62,10 @@ pub enum DocumentCommand {
         layer_id: LayerId,
         image: ImageContent,
     },
+    ReplaceImageInstanceAsset {
+        layer_id: LayerId,
+        asset_id: AssetId,
+    },
     SetTextContent {
         layer_id: LayerId,
         text: TextContent,
@@ -64,8 +86,57 @@ pub enum DocumentCommand {
     SetStackup {
         stackup: StackupPreset,
     },
+    InsertImageTreatment {
+        treatment: ImageTreatment,
+    },
+    InsertProcessedImage {
+        asset: Option<AssetReference>,
+        side: CardSide,
+        layer: ContentLayer,
+        index: usize,
+        treatment: ImageTreatment,
+        mapping: ProductionMapping,
+    },
+    SetTreatmentRecipe {
+        treatment_id: TreatmentId,
+        recipe: TreatmentRecipe,
+    },
+    SetImageProductionMode {
+        treatment_id: TreatmentId,
+        production_mode: ImageProductionMode,
+    },
+    DeleteImageTreatment {
+        treatment_id: TreatmentId,
+    },
+    SetManufacturerProfile {
+        profile: ManufacturerProfileSnapshot,
+    },
     ReorderLayer {
         layer_id: LayerId,
+        new_parent_id: Option<LayerId>,
+        new_index: usize,
+    },
+    MoveLayer {
+        layer_id: LayerId,
+        new_parent_id: Option<LayerId>,
+        new_index: usize,
+        from_target: ProductionTarget,
+        to_target: ProductionTarget,
+    },
+    TransferLayers {
+        layer_ids: Vec<LayerId>,
+        target: ProductionTarget,
+        new_parent_id: Option<LayerId>,
+        new_index: usize,
+        mode: LayerTransferMode,
+        duplicate_layer_ids: Vec<LayerId>,
+        duplicate_mapping_ids: Vec<MappingId>,
+        offset_um: i64,
+    },
+    PasteLayers {
+        layers: Vec<ContentLayer>,
+        mappings: Vec<ProductionMapping>,
+        target: ProductionTarget,
         new_parent_id: Option<LayerId>,
         new_index: usize,
     },
@@ -83,6 +154,20 @@ pub enum DocumentCommand {
     UnmapLayer {
         mapping_id: MappingId,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayerTransform {
+    pub layer_id: LayerId,
+    pub transform: TransformUm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LayerTransferMode {
+    Copy,
+    Move,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,12 +194,63 @@ impl DocumentCommand {
                 face_mut(document, side).layers.insert(index, layer);
             }
             Self::DeleteLayer { layer_id } => delete_layer(document, layer_id)?,
+            Self::DeleteLayers { layer_ids } => {
+                let selected = layer_ids.iter().copied().collect::<HashSet<_>>();
+                if selected.len() != layer_ids.len() {
+                    return Err(CommandError::DuplicateDeleteLayer);
+                }
+                for layer_id in &layer_ids {
+                    ensure_unlocked(layer(document, *layer_id)?)?;
+                }
+                let mut roots = Vec::new();
+                for layer_id in layer_ids {
+                    let mut parent_id = layer(document, layer_id)?.parent_id;
+                    let mut covered_by_selected_ancestor = false;
+                    while let Some(parent) = parent_id {
+                        if selected.contains(&parent) {
+                            covered_by_selected_ancestor = true;
+                            break;
+                        }
+                        parent_id = layer(document, parent)?.parent_id;
+                    }
+                    if !covered_by_selected_ancestor {
+                        roots.push(layer_id);
+                    }
+                }
+                for layer_id in roots {
+                    delete_layer(document, layer_id)?;
+                }
+            }
+            Self::DuplicateLayer {
+                layer_id,
+                duplicate_layer_id,
+                duplicate_mapping_ids,
+                offset_um,
+            } => duplicate_layer(
+                document,
+                layer_id,
+                duplicate_layer_id,
+                &duplicate_mapping_ids,
+                offset_um,
+            )?,
             Self::TransformLayer {
                 layer_id,
                 transform,
             } => {
                 ensure_layer_unlocked(document, layer_id)?;
                 transform_layer(document, layer_id, transform)?;
+            }
+            Self::TransformLayers { transforms } => {
+                let mut seen = HashSet::new();
+                for update in &transforms {
+                    if !seen.insert(update.layer_id) {
+                        return Err(CommandError::DuplicateTransformLayer(update.layer_id));
+                    }
+                    ensure_layer_unlocked(document, update.layer_id)?;
+                }
+                for update in transforms {
+                    transform_layer(document, update.layer_id, update.transform)?;
+                }
             }
             Self::SetLayerLock { layer_id, locked } => {
                 layer_mut(document, layer_id)?.locked = locked;
@@ -143,6 +279,9 @@ impl DocumentCommand {
                     });
                 }
                 layer.kind = ContentKind::Image(image);
+            }
+            Self::ReplaceImageInstanceAsset { layer_id, asset_id } => {
+                replace_image_instance_asset(document, layer_id, asset_id)?;
             }
             Self::SetTextContent { layer_id, text } => {
                 let layer = layer_mut(document, layer_id)?;
@@ -198,24 +337,131 @@ impl DocumentCommand {
                 };
             }
             Self::SetStackup { stackup } => {
+                document.manufacturer_profile.substrate = stackup.substrate;
+                document.manufacturer_profile.thickness_um = stackup.thickness_um;
+                document.manufacturer_profile.solder_mask = stackup.solder_mask_color;
+                document.manufacturer_profile.surface_finish = stackup.surface_finish;
                 document.stackup = stackup;
+            }
+            Self::InsertImageTreatment { treatment } => {
+                document.image_treatments.push(treatment);
+            }
+            Self::InsertProcessedImage {
+                asset,
+                side,
+                layer,
+                index,
+                treatment,
+                mapping,
+            } => {
+                if index > face(document, side).layers.len() {
+                    return Err(CommandError::InvalidLayerIndex(index));
+                }
+                if let Some(asset) = asset {
+                    document.assets.push(asset);
+                }
+                document.image_treatments.push(treatment);
+                face_mut(document, side).layers.insert(index, layer);
+                document.mappings.push(mapping);
+            }
+            Self::SetTreatmentRecipe {
+                treatment_id,
+                recipe,
+            } => {
+                let treatment = document
+                    .image_treatments
+                    .iter_mut()
+                    .find(|treatment| treatment.id == treatment_id)
+                    .ok_or(CommandError::TreatmentNotFound(treatment_id))?;
+                treatment.recipe = recipe;
+            }
+            Self::SetImageProductionMode {
+                treatment_id,
+                production_mode,
+            } => {
+                let treatment = document
+                    .image_treatments
+                    .iter_mut()
+                    .find(|treatment| treatment.id == treatment_id)
+                    .ok_or(CommandError::TreatmentNotFound(treatment_id))?;
+                treatment.production_mode = production_mode;
+            }
+            Self::DeleteImageTreatment { treatment_id } => {
+                let index = document
+                    .image_treatments
+                    .iter()
+                    .position(|treatment| treatment.id == treatment_id)
+                    .ok_or(CommandError::TreatmentNotFound(treatment_id))?;
+                document.image_treatments.remove(index);
+            }
+            Self::SetManufacturerProfile { profile } => {
+                document.stackup.substrate = profile.substrate;
+                document.stackup.thickness_um = profile.thickness_um;
+                document.stackup.solder_mask_color = profile.solder_mask;
+                document.stackup.surface_finish = profile.surface_finish;
+                document.manufacturer_profile = profile;
             }
             Self::ReorderLayer {
                 layer_id,
                 new_parent_id,
                 new_index,
             } => reorder_layer(document, layer_id, new_parent_id, new_index)?,
+            Self::MoveLayer {
+                layer_id,
+                new_parent_id,
+                new_index,
+                from_target,
+                to_target,
+            } => move_layer(
+                document,
+                layer_id,
+                new_parent_id,
+                new_index,
+                from_target,
+                to_target,
+            )?,
+            Self::TransferLayers {
+                layer_ids,
+                target,
+                new_parent_id,
+                new_index,
+                mode,
+                duplicate_layer_ids,
+                duplicate_mapping_ids,
+                offset_um,
+            } => transfer_layers(
+                document,
+                &layer_ids,
+                target,
+                new_parent_id,
+                new_index,
+                mode,
+                &duplicate_layer_ids,
+                &duplicate_mapping_ids,
+                offset_um,
+            )?,
+            Self::PasteLayers {
+                layers,
+                mappings,
+                target,
+                new_parent_id,
+                new_index,
+            } => paste_layers(document, layers, mappings, target, new_parent_id, new_index)?,
             Self::GroupLayers {
                 side,
                 group,
                 layer_ids,
             } => group_layers(document, side, group, layer_ids)?,
             Self::UngroupLayer { group_id } => ungroup_layer(document, group_id)?,
-            Self::MapLayer { mapping } => {
+            Self::MapLayer { mut mapping } => {
                 let (source_side, source_index) =
                     locate_layer(document, mapping.source_layer_id)
                         .ok_or(CommandError::LayerNotFound(mapping.source_layer_id))?;
                 let source = &face(document, source_side).layers[source_index];
+                let image_asset_id = match &source.kind {
+                    ContentKind::Image(image) => Some(image.asset_id),
+                    _ => None,
+                };
                 if source.locked {
                     return Err(CommandError::LayerLocked(source.id));
                 }
@@ -233,6 +479,25 @@ impl DocumentCommand {
                         layer_id: source.id,
                         target: mapping.target.canonical_name(),
                     });
+                }
+                if let Some(image_asset_id) = image_asset_id
+                    && mapping.treatment_id.is_none()
+                {
+                    let treatment_id = document
+                        .image_treatments
+                        .iter()
+                        .find(|treatment| treatment.asset_id == image_asset_id)
+                        .map(|treatment| treatment.id)
+                        .unwrap_or_else(|| {
+                            let treatment = ImageTreatment::new(
+                                image_asset_id,
+                                TreatmentRecipe::standard_monochrome(),
+                            );
+                            let treatment_id = treatment.id;
+                            document.image_treatments.push(treatment);
+                            treatment_id
+                        });
+                    mapping.treatment_id = Some(treatment_id);
                 }
                 document.mappings.push(mapping);
             }
@@ -313,8 +578,26 @@ pub enum CommandError {
     LayerNotFound(LayerId),
     #[error("production mapping not found: {0}")]
     MappingNotFound(MappingId),
+    #[error("duplicate layer needs {expected} mapping ids, received {actual}")]
+    DuplicateMappingIdCount { expected: usize, actual: usize },
+    #[error("batch delete contains a duplicate layer id")]
+    DuplicateDeleteLayer,
+    #[error("image treatment not found: {0}")]
+    TreatmentNotFound(TreatmentId),
     #[error("content layer is locked: {0}")]
     LayerLocked(LayerId),
+    #[error("batch transform contains duplicate layer id: {0}")]
+    DuplicateTransformLayer(LayerId),
+    #[error("layer transfer requires at least one content layer")]
+    EmptyLayerTransfer,
+    #[error("layer transfer contains a duplicate layer id: {0}")]
+    DuplicateTransferLayer(LayerId),
+    #[error("layer transfer spans more than one card face")]
+    MixedFaceLayerTransfer,
+    #[error("layer transfer needs {expected} duplicate layer ids, received {actual}")]
+    TransferLayerIdCount { expected: usize, actual: usize },
+    #[error("layer transfer needs {expected} duplicate mapping ids, received {actual}")]
+    TransferMappingIdCount { expected: usize, actual: usize },
     #[error("content layer {layer_id} is not a {expected} layer")]
     UnexpectedLayerKind {
         layer_id: LayerId,
@@ -450,6 +733,123 @@ fn delete_layer(document: &mut AtelierDocument, layer_id: LayerId) -> Result<(),
     Ok(())
 }
 
+fn duplicate_layer(
+    document: &mut AtelierDocument,
+    layer_id: LayerId,
+    duplicate_layer_id: LayerId,
+    duplicate_mapping_ids: &[MappingId],
+    offset_um: i64,
+) -> Result<(), CommandError> {
+    let (side, index) =
+        locate_layer(document, layer_id).ok_or(CommandError::LayerNotFound(layer_id))?;
+    let source = layer(document, layer_id)?;
+    ensure_unlocked(source)?;
+    if matches!(source.kind, ContentKind::BoardFill(_) | ContentKind::Group) {
+        return Err(CommandError::UnexpectedLayerKind {
+            layer_id,
+            expected: "image or text",
+        });
+    }
+    let source_mappings = document
+        .mappings
+        .iter()
+        .filter(|mapping| mapping.source_layer_id == layer_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if source_mappings.len() != duplicate_mapping_ids.len() {
+        return Err(CommandError::DuplicateMappingIdCount {
+            expected: source_mappings.len(),
+            actual: duplicate_mapping_ids.len(),
+        });
+    }
+
+    let mut duplicate = source.clone();
+    duplicate.id = duplicate_layer_id;
+    duplicate.name = format!("{} 副本", source.name);
+    duplicate.transform.x_um += offset_um;
+    duplicate.transform.y_um += offset_um;
+    face_mut(document, side).layers.insert(index + 1, duplicate);
+
+    for (source_mapping, mapping_id) in source_mappings
+        .into_iter()
+        .zip(duplicate_mapping_ids.iter().copied())
+    {
+        let mut duplicate_mapping = source_mapping;
+        duplicate_mapping.id = mapping_id;
+        duplicate_mapping.source_layer_id = duplicate_layer_id;
+        document.mappings.push(duplicate_mapping);
+    }
+    Ok(())
+}
+
+fn replace_image_instance_asset(
+    document: &mut AtelierDocument,
+    layer_id: LayerId,
+    replacement_asset_id: AssetId,
+) -> Result<(), CommandError> {
+    ensure_layer_unlocked(document, layer_id)?;
+    let (side, index) =
+        locate_layer(document, layer_id).ok_or(CommandError::LayerNotFound(layer_id))?;
+    let ContentKind::Image(image) = &face(document, side).layers[index].kind else {
+        return Err(CommandError::UnexpectedLayerKind {
+            layer_id,
+            expected: "image",
+        });
+    };
+    if !document
+        .assets
+        .iter()
+        .any(|asset| asset.id == replacement_asset_id)
+    {
+        return Err(CommandError::InvalidDocument(
+            DocumentError::MissingImageAsset {
+                layer_id,
+                asset_id: replacement_asset_id,
+            },
+        ));
+    }
+    let original_asset_id = image.asset_id;
+    let mapped_treatments = document
+        .mappings
+        .iter()
+        .filter(|mapping| mapping.source_layer_id == layer_id)
+        .filter_map(|mapping| mapping.treatment_id)
+        .collect::<HashSet<_>>();
+    let mut replacements = std::collections::HashMap::new();
+    for treatment_id in mapped_treatments {
+        let Some(existing) = document
+            .image_treatments
+            .iter()
+            .find(|treatment| treatment.id == treatment_id)
+        else {
+            continue;
+        };
+        if existing.asset_id != original_asset_id {
+            continue;
+        }
+        let replacement = ImageTreatment::new(replacement_asset_id, existing.recipe.clone());
+        replacements.insert(treatment_id, replacement.id);
+        document.image_treatments.push(replacement);
+    }
+    for mapping in document
+        .mappings
+        .iter_mut()
+        .filter(|mapping| mapping.source_layer_id == layer_id)
+    {
+        if let Some(replacement) = mapping
+            .treatment_id
+            .and_then(|treatment_id| replacements.get(&treatment_id))
+        {
+            mapping.treatment_id = Some(*replacement);
+        }
+    }
+    let ContentKind::Image(image) = &mut face_mut(document, side).layers[index].kind else {
+        unreachable!("image kind was checked before replacement")
+    };
+    image.asset_id = replacement_asset_id;
+    Ok(())
+}
+
 fn reorder_layer(
     document: &mut AtelierDocument,
     layer_id: LayerId,
@@ -503,6 +903,325 @@ fn reorder_layer(
         .parent_id = new_parent_id;
     remaining.splice(new_index..new_index, moving);
     selected_face.layers = remaining;
+    Ok(())
+}
+
+fn move_layer(
+    document: &mut AtelierDocument,
+    layer_id: LayerId,
+    new_parent_id: Option<LayerId>,
+    new_index: usize,
+    from_target: ProductionTarget,
+    to_target: ProductionTarget,
+) -> Result<(), CommandError> {
+    let (side, index) =
+        locate_layer(document, layer_id).ok_or(CommandError::LayerNotFound(layer_id))?;
+    let mut moving_ids = if matches!(face(document, side).layers[index].kind, ContentKind::Group) {
+        descendant_ids(face(document, side), layer_id)
+    } else {
+        HashSet::new()
+    };
+    moving_ids.insert(layer_id);
+    if to_target.layer != FaceProductionLayer::Copper
+        && face(document, side).layers.iter().any(|layer| {
+            moving_ids.contains(&layer.id) && matches!(layer.kind, ContentKind::BoardFill(_))
+        })
+    {
+        return Err(CommandError::InvalidBoardFillTarget {
+            layer_id,
+            target: to_target.canonical_name(),
+        });
+    }
+
+    reorder_layer(document, layer_id, new_parent_id, new_index)?;
+    if from_target == to_target {
+        return Ok(());
+    }
+    for mapping in &mut document.mappings {
+        if moving_ids.contains(&mapping.source_layer_id) && mapping.target == from_target {
+            mapping.target = to_target;
+        }
+    }
+    let mut seen = HashSet::new();
+    document
+        .mappings
+        .retain(|mapping| seen.insert((mapping.source_layer_id, mapping.target, mapping.combine)));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transfer_layers(
+    document: &mut AtelierDocument,
+    layer_ids: &[LayerId],
+    target: ProductionTarget,
+    new_parent_id: Option<LayerId>,
+    new_index: usize,
+    mode: LayerTransferMode,
+    duplicate_layer_ids: &[LayerId],
+    duplicate_mapping_ids: &[MappingId],
+    offset_um: i64,
+) -> Result<(), CommandError> {
+    if layer_ids.is_empty() {
+        return Err(CommandError::EmptyLayerTransfer);
+    }
+    let mut selected = HashSet::new();
+    let mut source_side = None;
+    for layer_id in layer_ids {
+        if !selected.insert(*layer_id) {
+            return Err(CommandError::DuplicateTransferLayer(*layer_id));
+        }
+        let (side, _) =
+            locate_layer(document, *layer_id).ok_or(CommandError::LayerNotFound(*layer_id))?;
+        if source_side.is_some_and(|source| source != side) {
+            return Err(CommandError::MixedFaceLayerTransfer);
+        }
+        source_side = Some(side);
+    }
+    let source_side = source_side.expect("non-empty transfer has a source face");
+
+    let roots = layer_ids
+        .iter()
+        .copied()
+        .filter(|layer_id| {
+            let mut parent_id = layer(document, *layer_id)
+                .expect("selected layer was located")
+                .parent_id;
+            while let Some(parent) = parent_id {
+                if selected.contains(&parent) {
+                    return false;
+                }
+                parent_id = layer(document, parent)
+                    .expect("validated document has every parent")
+                    .parent_id;
+            }
+            true
+        })
+        .collect::<Vec<_>>();
+
+    let mut transferring_ids = HashSet::new();
+    for root_id in &roots {
+        ensure_layer_unlocked(document, *root_id)?;
+        transferring_ids.insert(*root_id);
+        transferring_ids.extend(descendant_ids(face(document, source_side), *root_id));
+    }
+    for transferring_id in &transferring_ids {
+        ensure_unlocked(layer(document, *transferring_id)?)?;
+    }
+
+    if target.layer != FaceProductionLayer::Copper
+        && face(document, source_side).layers.iter().any(|candidate| {
+            transferring_ids.contains(&candidate.id)
+                && matches!(candidate.kind, ContentKind::BoardFill(_))
+        })
+    {
+        return Err(CommandError::InvalidBoardFillTarget {
+            layer_id: roots[0],
+            target: target.canonical_name(),
+        });
+    }
+    if mode == LayerTransferMode::Copy
+        && face(document, source_side).layers.iter().any(|candidate| {
+            transferring_ids.contains(&candidate.id)
+                && matches!(candidate.kind, ContentKind::BoardFill(_))
+        })
+    {
+        return Err(CommandError::UnexpectedLayerKind {
+            layer_id: roots[0],
+            expected: "image, text, or group",
+        });
+    }
+
+    if let Some(parent_id) = new_parent_id {
+        let (parent_side, parent_index) =
+            locate_layer(document, parent_id).ok_or(CommandError::LayerNotFound(parent_id))?;
+        if parent_side != target.side {
+            return Err(CommandError::LayerOnWrongFace {
+                layer_id: parent_id,
+                expected_side: target.side,
+                actual_side: parent_side,
+            });
+        }
+        if !matches!(
+            face(document, parent_side).layers[parent_index].kind,
+            ContentKind::Group
+        ) {
+            return Err(CommandError::NotAGroup(parent_id));
+        }
+        if transferring_ids.contains(&parent_id) {
+            return Err(CommandError::InvalidDocument(DocumentError::LayerCycle(
+                roots[0],
+            )));
+        }
+    }
+
+    let source_layers = face(document, source_side)
+        .layers
+        .iter()
+        .filter(|candidate| transferring_ids.contains(&candidate.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let source_mappings = document
+        .mappings
+        .iter()
+        .filter(|mapping| transferring_ids.contains(&mapping.source_layer_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match mode {
+        LayerTransferMode::Copy => {
+            if source_layers.len() != duplicate_layer_ids.len() {
+                return Err(CommandError::TransferLayerIdCount {
+                    expected: source_layers.len(),
+                    actual: duplicate_layer_ids.len(),
+                });
+            }
+            if source_mappings.len() != duplicate_mapping_ids.len() {
+                return Err(CommandError::TransferMappingIdCount {
+                    expected: source_mappings.len(),
+                    actual: duplicate_mapping_ids.len(),
+                });
+            }
+            if new_index > face(document, target.side).layers.len() {
+                return Err(CommandError::InvalidLayerIndex(new_index));
+            }
+
+            let id_map = source_layers
+                .iter()
+                .map(|source| source.id)
+                .zip(duplicate_layer_ids.iter().copied())
+                .collect::<HashMap<_, _>>();
+            let mut duplicates = source_layers;
+            for duplicate in &mut duplicates {
+                let source_id = duplicate.id;
+                duplicate.id = id_map[&source_id];
+                duplicate.parent_id = if roots.contains(&source_id) {
+                    new_parent_id
+                } else {
+                    duplicate
+                        .parent_id
+                        .and_then(|parent| id_map.get(&parent).copied())
+                };
+                if roots.contains(&source_id) {
+                    duplicate.name = format!("{} 副本", duplicate.name);
+                }
+                duplicate.transform.x_um += offset_um;
+                duplicate.transform.y_um += offset_um;
+            }
+            face_mut(document, target.side)
+                .layers
+                .splice(new_index..new_index, duplicates);
+
+            for (mut mapping, duplicate_mapping_id) in source_mappings
+                .into_iter()
+                .zip(duplicate_mapping_ids.iter().copied())
+            {
+                mapping.id = duplicate_mapping_id;
+                mapping.source_layer_id = id_map[&mapping.source_layer_id];
+                mapping.target = target;
+                document.mappings.push(mapping);
+            }
+            let mut seen = HashSet::new();
+            document.mappings.retain(|mapping| {
+                seen.insert((mapping.source_layer_id, mapping.target, mapping.combine))
+            });
+        }
+        LayerTransferMode::Move => {
+            if !duplicate_layer_ids.is_empty() {
+                return Err(CommandError::TransferLayerIdCount {
+                    expected: 0,
+                    actual: duplicate_layer_ids.len(),
+                });
+            }
+            if !duplicate_mapping_ids.is_empty() {
+                return Err(CommandError::TransferMappingIdCount {
+                    expected: 0,
+                    actual: duplicate_mapping_ids.len(),
+                });
+            }
+
+            face_mut(document, source_side)
+                .layers
+                .retain(|candidate| !transferring_ids.contains(&candidate.id));
+            let target_len = face(document, target.side).layers.len();
+            if new_index > target_len {
+                return Err(CommandError::InvalidLayerIndex(new_index));
+            }
+            let mut moving = source_layers;
+            for candidate in &mut moving {
+                if roots.contains(&candidate.id) {
+                    candidate.parent_id = new_parent_id;
+                }
+            }
+            face_mut(document, target.side)
+                .layers
+                .splice(new_index..new_index, moving);
+            for mapping in &mut document.mappings {
+                if transferring_ids.contains(&mapping.source_layer_id) {
+                    mapping.target = target;
+                }
+            }
+            let mut seen = HashSet::new();
+            document.mappings.retain(|mapping| {
+                seen.insert((mapping.source_layer_id, mapping.target, mapping.combine))
+            });
+        }
+    }
+    Ok(())
+}
+
+fn paste_layers(
+    document: &mut AtelierDocument,
+    mut layers: Vec<ContentLayer>,
+    mut mappings: Vec<ProductionMapping>,
+    target: ProductionTarget,
+    new_parent_id: Option<LayerId>,
+    new_index: usize,
+) -> Result<(), CommandError> {
+    if layers.is_empty() {
+        return Err(CommandError::EmptyLayerTransfer);
+    }
+    if new_index > face(document, target.side).layers.len() {
+        return Err(CommandError::InvalidLayerIndex(new_index));
+    }
+    let pasted_ids = layers.iter().map(|layer| layer.id).collect::<HashSet<_>>();
+    if pasted_ids.len() != layers.len() {
+        return Err(CommandError::DuplicateTransferLayer(layers[0].id));
+    }
+    if let Some(parent_id) = new_parent_id {
+        let (parent_side, parent_index) =
+            locate_layer(document, parent_id).ok_or(CommandError::LayerNotFound(parent_id))?;
+        if parent_side != target.side {
+            return Err(CommandError::LayerOnWrongFace {
+                layer_id: parent_id,
+                expected_side: target.side,
+                actual_side: parent_side,
+            });
+        }
+        if !matches!(
+            face(document, parent_side).layers[parent_index].kind,
+            ContentKind::Group
+        ) {
+            return Err(CommandError::NotAGroup(parent_id));
+        }
+    }
+    for layer in &mut layers {
+        if layer
+            .parent_id
+            .is_none_or(|parent| !pasted_ids.contains(&parent))
+        {
+            layer.parent_id = new_parent_id;
+        }
+    }
+    for mapping in &mut mappings {
+        if !pasted_ids.contains(&mapping.source_layer_id) {
+            return Err(CommandError::LayerNotFound(mapping.source_layer_id));
+        }
+        mapping.target = target;
+    }
+    face_mut(document, target.side)
+        .layers
+        .splice(new_index..new_index, layers);
+    document.mappings.extend(mappings);
     Ok(())
 }
 

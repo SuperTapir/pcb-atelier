@@ -2,8 +2,9 @@ export type BenchmarkFace = "front" | "back";
 
 export const OBJECTS_PER_FACE = 100;
 export const TOTAL_EDITABLE_OBJECTS = OBJECTS_PER_FACE * 2;
-export const MAXIMUM_INACTIVE_DRAWS_PER_ACTIVE_CYCLE = 6;
-export const MAXIMUM_INACTIVE_DRAW_RATIO = 0.02;
+export const MAXIMUM_INACTIVE_DRAWS_PER_ACTIVE_CYCLE = 0;
+export const MAXIMUM_INACTIVE_DRAW_RATIO = 0;
+export const MAXIMUM_GESTURE_UPDATE_P95_MS = 16.7;
 
 export type EditableObject =
   | {
@@ -47,6 +48,34 @@ export interface InactiveBoardDrawResult {
   passed: boolean;
 }
 
+export interface GesturePerformanceSample {
+  editableObjects: number;
+  updateDurationsMs: number[];
+  productionCompileCalls: number;
+  ipcCalls: number;
+  synchronousIpcCalls: number;
+}
+
+export interface GesturePerformanceResult {
+  editableObjects: number;
+  measuredUpdates: number;
+  productionCompileCalls: number;
+  ipcCalls: number;
+  synchronousIpcCalls: number;
+  averageMs: number;
+  p95Ms: number;
+  maximumMs: number;
+  checks: {
+    objectCount: boolean;
+    measured: boolean;
+    p95: boolean;
+    noProductionCompile: boolean;
+    noIpc: boolean;
+    noSynchronousIpc: boolean;
+  };
+  passed: boolean;
+}
+
 export function createDualBoardObjects(
   board = { width: 410, height: 540 },
 ): Record<BenchmarkFace, EditableObject[]> {
@@ -80,6 +109,35 @@ export function evaluateInactiveBoardDraws(
           sample.activeDraws > 0 &&
           sample.inactiveDraws <= MAXIMUM_INACTIVE_DRAWS_PER_ACTIVE_CYCLE,
       ) && inactiveDrawRatio <= MAXIMUM_INACTIVE_DRAW_RATIO,
+  };
+}
+
+export function evaluateGesturePerformance(
+  sample: GesturePerformanceSample,
+): GesturePerformanceResult {
+  const averageMs =
+    sample.updateDurationsMs.reduce((sum, value) => sum + value, 0) /
+    Math.max(sample.updateDurationsMs.length, 1);
+  const p95Ms = percentile(sample.updateDurationsMs, 0.95);
+  const checks = {
+    objectCount: sample.editableObjects === TOTAL_EDITABLE_OBJECTS,
+    measured: sample.updateDurationsMs.length > 0,
+    p95: p95Ms <= MAXIMUM_GESTURE_UPDATE_P95_MS,
+    noProductionCompile: sample.productionCompileCalls === 0,
+    noIpc: sample.ipcCalls === 0,
+    noSynchronousIpc: sample.synchronousIpcCalls === 0,
+  };
+  return {
+    editableObjects: sample.editableObjects,
+    measuredUpdates: sample.updateDurationsMs.length,
+    productionCompileCalls: sample.productionCompileCalls,
+    ipcCalls: sample.ipcCalls,
+    synchronousIpcCalls: sample.synchronousIpcCalls,
+    averageMs,
+    p95Ms,
+    maximumMs: Math.max(0, ...sample.updateDurationsMs),
+    checks,
+    passed: Object.values(checks).every(Boolean),
   };
 }
 
@@ -123,4 +181,9 @@ function makeFaceObjects(
     });
   }
   return objects;
+}
+
+function percentile(values: number[], fraction: number) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.ceil(sorted.length * fraction) - 1] ?? 0;
 }

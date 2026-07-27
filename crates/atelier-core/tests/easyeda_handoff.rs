@@ -3,8 +3,9 @@ mod support;
 use std::{fs::File, io::Read};
 
 use atelier_core::{
-    ProjectBundleRasterizer, compile_fabrication_plan, convert_easyeda_archive_to_native,
-    export_public_archive, preflight_resolved_board, resolve_fabrication_plan,
+    ProjectBundleRasterizer, SamplingPurpose, compile_fabrication_plan,
+    convert_easyeda_archive_to_native, export_public_archive, preflight_resolved_board,
+    resolve_fabrication_plan, resolve_fabrication_plan_for_purpose,
     validate_easyeda_native_project, validate_public_archive,
 };
 use serde_json::Value;
@@ -18,7 +19,12 @@ fn fabrication_board_round_trips_through_the_real_native_eda_envelope() {
     let plan =
         compile_fabrication_plan(&fixture.bundle.document).expect("compile golden card plan");
     let mut rasterizer = ProjectBundleRasterizer::new(&fixture.bundle).expect("embedded font");
-    let board = resolve_fabrication_plan(&plan, 500, &mut rasterizer).expect("resolve masks");
+    let board = resolve_fabrication_plan_for_purpose(
+        &plan,
+        SamplingPurpose::FormalProduction,
+        &mut rasterizer,
+    )
+    .expect("resolve formal masks");
     assert!(preflight_resolved_board(&board).can_export);
     let directory = tempfile::tempdir().expect("temporary directory");
     let public_path = directory.path().join("golden.epro2");
@@ -34,7 +40,10 @@ fn fabrication_board_round_trips_through_the_real_native_eda_envelope() {
     );
     assert_eq!(public_validation.board_width_um, 64_000);
     assert_eq!(public_validation.board_height_um, 100_000);
-    assert!(public_validation.fill_count >= 6);
+    assert_eq!(
+        public_validation.fill_count, 6,
+        "each populated production layer should be one editable EasyEDA artwork object"
+    );
     assert_eq!(public_validation.hole_count, 1);
     assert_eq!(public_validation.filled_layer_ids, vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(public.epru_file, "golden.epru");
@@ -165,5 +174,24 @@ fn public_export_preflight_rejects_incomplete_resolved_boards() {
             .errors
             .iter()
             .any(|error| error.contains("six production layers"))
+    );
+}
+
+#[test]
+fn public_export_preflight_rejects_non_formal_resolved_boards() {
+    let fixture = asymmetric_golden_card();
+    let plan =
+        compile_fabrication_plan(&fixture.bundle.document).expect("compile golden card plan");
+    let mut rasterizer = ProjectBundleRasterizer::new(&fixture.bundle).expect("embedded font");
+    let board = resolve_fabrication_plan(&plan, 500, &mut rasterizer).expect("resolve preview");
+
+    let preflight = preflight_resolved_board(&board);
+
+    assert!(!preflight.can_export);
+    assert!(
+        preflight
+            .errors
+            .iter()
+            .any(|error| error.contains("formalProduction"))
     );
 }

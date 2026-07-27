@@ -1,8 +1,9 @@
 use atelier_cli::execute;
 use atelier_core::{
     AtelierDocument, CardSide, CombineMode, CommandHistory, ContentLayer, DocumentCommand,
-    FaceProductionLayer, MechanicalFeature, ProductionMapping, ProductionTarget, ProjectBundle,
-    ProjectBundleRasterizer, TransformUm, compile_fabrication_plan, resolve_fabrication_plan,
+    FaceProductionLayer, ImageTreatment, MechanicalFeature, ProductionMapping, ProductionTarget,
+    ProjectBundle, ProjectBundleRasterizer, SamplingPurpose, TransformUm, TreatmentRecipe,
+    compile_fabrication_plan, resolve_fabrication_plan, resolve_fabrication_plan_for_purpose,
 };
 use sha2::{Digest, Sha256};
 
@@ -126,7 +127,13 @@ fn production_inspect_matches_direct_core_for_the_same_pcba_fixture() {
             .as_array()
             .expect("layers")
             .iter()
-            .find(|candidate| candidate["target"] == layer.target.canonical_name())
+            .find(|candidate| {
+                serde_json::from_value::<atelier_core::ProductionTarget>(
+                    candidate["target"].clone(),
+                )
+                .ok()
+                    == Some(layer.target)
+            })
             .expect("matching target");
         assert_eq!(actual_layer["compositeSha256"], layer.composite_sha256);
     }
@@ -141,15 +148,27 @@ fn export_easyeda_uses_the_same_resolved_board_and_reports_versioned_artifacts()
     bundle.save(&project_path).expect("save fixture");
     let plan = compile_fabrication_plan(&bundle.document).expect("compile directly");
     let mut rasterizer = ProjectBundleRasterizer::new(&bundle).expect("embedded font");
-    let expected =
-        resolve_fabrication_plan(&plan, 500, &mut rasterizer).expect("resolve explicit pitch");
+    let expected = resolve_fabrication_plan_for_purpose(
+        &plan,
+        SamplingPurpose::FormalProduction,
+        &mut rasterizer,
+    )
+    .expect("resolve formal production");
 
-    let output = execute(&[
+    let error = execute(&[
         "export-easyeda".to_owned(),
         project_path.display().to_string(),
         destination.display().to_string(),
         "--pitch-um".to_owned(),
         "500".to_owned(),
+    ])
+    .expect_err("non-formal export pitch is rejected");
+    assert!(error.to_string().contains("formalProduction"));
+
+    let output = execute(&[
+        "export-easyeda".to_owned(),
+        project_path.display().to_string(),
+        destination.display().to_string(),
     ])
     .expect("export through CLI");
     let report: serde_json::Value = serde_json::from_str(&output).expect("report JSON");
@@ -182,6 +201,114 @@ fn export_easyeda_uses_the_same_resolved_board_and_reports_versioned_artifacts()
     );
     assert!(
         std::path::Path::new(report["nativeProjectPath"].as_str().expect("native path")).is_file()
+    );
+}
+
+#[test]
+fn cli_import_compile_validate_and_trace_use_embedded_project_data() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let project_path = temp.path().join("media.pcba");
+    let source_path = temp.path().join("source.png");
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 2)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("encode source PNG");
+    std::fs::write(&source_path, encoded.into_inner()).expect("write source");
+    ProjectBundle::new(AtelierDocument::new_card("CLI 素材", 10_000, 10_000))
+        .save(&project_path)
+        .expect("save project");
+
+    let imported = execute(&[
+        "asset-import".to_owned(),
+        project_path.display().to_string(),
+        source_path.display().to_string(),
+        "--media-type".to_owned(),
+        "image/png".to_owned(),
+        "--pixel-width".to_owned(),
+        "2".to_owned(),
+        "--pixel-height".to_owned(),
+        "2".to_owned(),
+    ])
+    .expect("import asset");
+    let imported: serde_json::Value = serde_json::from_str(&imported).expect("asset report JSON");
+    assert_eq!(imported["reused"], false);
+
+    let mut bundle = ProjectBundle::open(&project_path).expect("open imported project");
+    let asset_id = bundle.document.assets[0].id;
+    let treatment = ImageTreatment::new(asset_id, TreatmentRecipe::default());
+    let treatment_id = treatment.id;
+    let image = ContentLayer::new_image(
+        "嵌入图片",
+        asset_id,
+        TransformUm::rect(1_000, 1_000, 4_000, 4_000),
+    );
+    let image_id = image.id;
+    bundle.document.image_treatments.push(treatment);
+    bundle.document.front.layers.push(image);
+    let mut mapping = ProductionMapping::new(
+        image_id,
+        ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen),
+        CombineMode::Add,
+    );
+    mapping.treatment_id = Some(treatment_id);
+    bundle.document.mappings.push(mapping);
+    bundle.save(&project_path).expect("save treatment fixture");
+    std::fs::remove_file(&source_path).expect("remove original source");
+
+    let compile = execute(&[
+        "treatment-compile".to_owned(),
+        project_path.display().to_string(),
+        treatment_id.to_string(),
+        "--width-um".to_owned(),
+        "4000".to_owned(),
+        "--height-um".to_owned(),
+        "4000".to_owned(),
+        "--purpose".to_owned(),
+        "formal-production".to_owned(),
+    ])
+    .expect("compile embedded treatment without source file");
+    let compile: serde_json::Value = serde_json::from_str(&compile).expect("compile report JSON");
+    assert_eq!(compile["treatmentId"], treatment_id.to_string());
+    assert_eq!(compile["purpose"], "formalProduction");
+    assert_eq!(
+        compile["recipeFingerprint"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(compile["maskSha256"].as_str().map(str::len), Some(64));
+
+    let manufacturer = execute(&[
+        "manufacturer-validate".to_owned(),
+        project_path.display().to_string(),
+    ])
+    .expect("validate manufacturer");
+    let manufacturer: serde_json::Value =
+        serde_json::from_str(&manufacturer).expect("manufacturer JSON");
+    assert_eq!(manufacturer["valid"], true);
+    assert_eq!(manufacturer["profile"]["manufacturerId"], "jlcpcb");
+
+    let trace = execute(&[
+        "production-inspect".to_owned(),
+        project_path.display().to_string(),
+        "--pitch-um".to_owned(),
+        "500".to_owned(),
+    ])
+    .expect("trace production");
+    let trace: serde_json::Value = serde_json::from_str(&trace).expect("trace JSON");
+    assert_eq!(trace["operations"].as_array().map(Vec::len), Some(1));
+    assert_eq!(trace["operations"][0]["assetId"], asset_id.to_string());
+    assert_eq!(
+        trace["operations"][0]["treatmentId"],
+        treatment_id.to_string()
+    );
+    assert_eq!(
+        trace["operations"][0]["algorithmVersion"],
+        atelier_core::TREATMENT_ALGORITHM_VERSION
+    );
+    assert_eq!(
+        trace["operations"][0]["recipeFingerprint"]
+            .as_str()
+            .map(str::len),
+        Some(64)
     );
 }
 

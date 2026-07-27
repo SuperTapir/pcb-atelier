@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   cycleOverlappingSelection,
   resolveLayerSelection,
+  resolveTreeLayerSelection,
 } from "@/features/workspace/layer-selection";
 import type { ContentLayer } from "@/lib/core";
 
@@ -47,6 +48,45 @@ describe("layer selection", () => {
     expect(cycleOverlappingSelection(["peer", "group"], ["peer"])).toEqual([
       "group",
     ]);
+  });
+
+  it("supports exact row selection, command toggling, and shift ranges in the tree", () => {
+    expect(
+      resolveTreeLayerSelection({
+        anchorId: null,
+        current: [],
+        layerId: "child",
+        orderedLayerIds: ["group", "child", "peer"],
+        rangeKey: false,
+        toggleKey: false,
+      }),
+    ).toEqual({ anchorId: "child", selectedIds: ["child"] });
+    expect(
+      resolveTreeLayerSelection({
+        anchorId: "child",
+        current: ["child"],
+        layerId: "peer",
+        orderedLayerIds: ["group", "child", "peer"],
+        rangeKey: false,
+        toggleKey: true,
+      }),
+    ).toEqual({
+      anchorId: "peer",
+      selectedIds: ["child", "peer"],
+    });
+    expect(
+      resolveTreeLayerSelection({
+        anchorId: "group",
+        current: ["group"],
+        layerId: "peer",
+        orderedLayerIds: ["group", "child", "peer"],
+        rangeKey: true,
+        toggleKey: false,
+      }),
+    ).toEqual({
+      anchorId: "group",
+      selectedIds: ["group", "child", "peer"],
+    });
   });
 });
 

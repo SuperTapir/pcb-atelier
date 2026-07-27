@@ -3,30 +3,37 @@ import {
   ChevronDown,
   ChevronRight,
   CircuitBoard,
+  Copy,
+  CopyPlus,
   Eye,
   EyeOff,
   Focus,
   Group,
   ImageIcon,
-  PaintBucket,
-  Type,
-  Link2,
   Lock,
-  MoreHorizontal,
+  PaintBucket,
   Paintbrush,
   Pencil,
-  Scan,
+  Scissors,
   Trash2,
+  Type,
   Unlock,
 } from "lucide-react";
 import {
   useEffect,
+  useRef,
   useState,
   type DragEvent,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 
+import {
+  hasProjectAssetDragPayload,
+  parseProjectAssetDragPayload,
+  readProjectAssetDragPayload,
+} from "@/features/media/ProjectMediaLibrary";
 import type {
   CardFace,
   WorkContext,
@@ -50,21 +57,33 @@ interface ProductionLayerTreeProps {
   layers: FaceLayers;
   mappings: ProductionMapping[];
   selectedIds: FaceSelections;
+  onCopy?: () => void;
   onCreateBoardFill: (face: CardFace) => void;
-  onReorder?: (
+  onCut?: () => void;
+  onDelete?: () => void;
+  onDropProjectAsset?: (
+    assetId: string,
     face: CardFace,
+    productionLayer: WorkContext,
+  ) => void;
+  onReorder?: (
+    sourceFace: CardFace,
+    targetFace: CardFace,
     layerId: string,
     newParentId: string | null,
     newIndex: number,
+    sourceContext: WorkContext,
+    targetContext: WorkContext,
   ) => void;
+  onDuplicate?: () => void;
   onRename?: (layer: ContentLayer, name: string) => void;
-  onRemoveMapping?: (mappingId: string) => void;
   onSelectBoard: () => void;
   onSelectContext: (face: CardFace, context: WorkContext) => void;
   onSelectSource: (
     face: CardFace,
     layerId: string,
     event: MouseEvent,
+    orderedLayerIds: string[],
   ) => void;
   onToggleIsolation?: (face: CardFace, context: WorkContext) => void;
   onToggleLock?: (layer: ContentLayer) => void;
@@ -103,9 +122,9 @@ const PRODUCTION_NODES: Array<{
   },
 ];
 
-const FACES: Array<{ id: CardFace; label: string; physicalLabel: string }> = [
-  { id: "front", label: "正面", physicalLabel: "顶面" },
-  { id: "back", label: "背面", physicalLabel: "底面" },
+const FACES: Array<{ id: CardFace; label: string }> = [
+  { id: "front", label: "正面" },
+  { id: "back", label: "背面" },
 ];
 
 export function ProductionLayerTree({
@@ -116,19 +135,21 @@ export function ProductionLayerTree({
   layers,
   mappings,
   selectedIds,
+  onCopy,
   onCreateBoardFill,
+  onCut,
+  onDelete,
+  onDropProjectAsset,
+  onDuplicate,
   onReorder,
   onRename,
-  onRemoveMapping,
   onSelectBoard,
   onSelectContext,
   onSelectSource,
-  onToggleIsolation,
   onToggleLock,
   onToggleProductionVisibility,
   onToggleVisibility,
 }: ProductionLayerTreeProps) {
-  const associationCount = countMappingsBySource(mappings);
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [dragging, setDragging] = useState<{
@@ -137,9 +158,26 @@ export function ProductionLayerTree({
     layerId: string;
   } | null>(null);
   const [dropTarget, setDropTarget] = useState<{
+    face: CardFace;
+    context: WorkContext;
     layerId: string | null;
     placement: LayerDropPlacement;
+    valid: boolean;
   } | null>(null);
+  const [projectAssetDropTarget, setProjectAssetDropTarget] = useState<{
+    face: CardFace;
+    context: WorkContext;
+  } | null>(null);
+  const pointerDragRef = useRef<{
+    active: boolean;
+    context: WorkContext;
+    face: CardFace;
+    layerId: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
   const [expanded, setExpanded] = useState<
     Record<CardFace, Set<WorkContext>>
   >(() => ({
@@ -201,6 +239,234 @@ export function ProductionLayerTree({
     if (name && name !== layer.name) onRename?.(layer, name);
   };
 
+  const pointerDropAt = (clientX: number, clientY: number) => {
+    const dragging = pointerDragRef.current;
+    if (!dragging?.active) return null;
+    const element = document.elementFromPoint(clientX, clientY);
+    const rootDrop = element?.closest<HTMLElement>(
+      "[data-production-layer-drop]",
+    );
+    if (rootDrop?.dataset.layerDropFace) {
+      const targetFace = rootDrop.dataset.layerDropFace as CardFace;
+      const targetContext = rootDrop.dataset
+        .layerDropContext as WorkContext;
+      if (
+        !canMoveLayerToContext(
+          layers[dragging.face],
+          dragging.layerId,
+          targetContext,
+        )
+      ) {
+        return null;
+      }
+      const intent =
+        targetFace === dragging.face
+          ? resolveLayerDrop(
+              layers[dragging.face],
+              dragging.layerId,
+              null,
+              "rootEnd",
+            )
+          : resolveCrossFaceLayerDrop(
+              layers[dragging.face],
+              layers[targetFace],
+              dragging.layerId,
+              null,
+              "rootEnd",
+            );
+      return intent
+        ? {
+            intent,
+            target: {
+              face: targetFace,
+              context: targetContext,
+              layerId: null,
+              placement: "rootEnd" as const,
+              valid: true,
+            },
+          }
+        : null;
+    }
+
+    const row = element?.closest<HTMLElement>("[data-layer-drop-id]");
+    if (
+      !row ||
+      !row.dataset.layerDropFace
+    ) {
+      return null;
+    }
+    const targetFace = row.dataset.layerDropFace as CardFace;
+    const targetContext = row.dataset.layerDropContext as WorkContext;
+    if (
+      !canMoveLayerToContext(
+        layers[dragging.face],
+        dragging.layerId,
+        targetContext,
+      )
+    ) {
+      return null;
+    }
+    const targetLayerId = row.dataset.layerDropId;
+    const target = layers[targetFace].find(
+      (layer) => layer.id === targetLayerId,
+    );
+    if (!target || !targetLayerId) return null;
+    const placement = layerDropPlacement(clientY, row, target);
+    const intent =
+      targetFace === dragging.face
+        ? resolveLayerDrop(
+            layers[dragging.face],
+            dragging.layerId,
+            targetLayerId,
+            placement,
+          )
+        : resolveCrossFaceLayerDrop(
+            layers[dragging.face],
+            layers[targetFace],
+            dragging.layerId,
+            targetLayerId,
+            placement,
+          );
+    return intent
+      ? {
+          intent,
+          target: {
+            face: targetFace,
+            context: targetContext,
+            layerId: targetLayerId,
+            placement,
+            valid: true,
+          },
+        }
+      : null;
+  };
+
+  const invalidPointerTargetAt = (clientX: number, clientY: number) => {
+    const element = document.elementFromPoint(clientX, clientY);
+    const target = element?.closest<HTMLElement>(
+      "[data-layer-drop-id], [data-production-layer-drop]",
+    );
+    if (!target) return null;
+    const context = target.dataset.layerDropContext as
+      | WorkContext
+      | undefined;
+    if (!context) return null;
+    return {
+      face: (target.dataset.layerDropFace as CardFace) ?? dragging?.face ?? activeFace,
+      context,
+      layerId: target.dataset.layerDropId ?? null,
+      placement: "rootEnd" as const,
+      valid: false,
+    };
+  };
+
+  const handleLayerPointerMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (
+      !drag.active &&
+      Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4
+    ) {
+      return;
+    }
+    if (!drag.active) {
+      drag.active = true;
+      suppressClickRef.current = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setDragging({
+        face: drag.face,
+        context: drag.context,
+        layerId: drag.layerId,
+      });
+    }
+    event.preventDefault();
+    const candidate = pointerDropAt(event.clientX, event.clientY);
+    const feedback =
+      candidate?.target ??
+      invalidPointerTargetAt(event.clientX, event.clientY);
+    setDropTarget(feedback);
+    document.documentElement.style.cursor = candidate
+      ? "grabbing"
+      : feedback
+        ? "not-allowed"
+        : "grabbing";
+  };
+
+  const finishLayerPointerDrag = (
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (drag.active) {
+      event.preventDefault();
+      const candidate = pointerDropAt(event.clientX, event.clientY);
+      if (candidate) {
+        onReorder?.(
+          drag.face,
+          candidate.target.face,
+          drag.layerId,
+          candidate.intent.newParentId,
+          candidate.intent.newIndex,
+          drag.context,
+          candidate.target.context,
+        );
+      }
+      globalThis.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    }
+    pointerDragRef.current = null;
+    document.documentElement.style.removeProperty("cursor");
+    setDragging(null);
+    setDropTarget(null);
+  };
+
+  const acceptsProjectAsset = (event: DragEvent<HTMLElement>) =>
+    hasProjectAssetDragPayload(event.dataTransfer);
+
+  const handleProjectAssetDragOver = (
+    event: DragEvent<HTMLElement>,
+    face: CardFace,
+    context: WorkContext,
+  ) => {
+    if (!acceptsProjectAsset(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    setProjectAssetDropTarget({ face, context });
+  };
+
+  const handleProjectAssetDrop = (
+    event: DragEvent<HTMLElement>,
+    face: CardFace,
+    context: WorkContext,
+  ) => {
+    if (!acceptsProjectAsset(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const projectAsset = readProjectAssetDragPayload(event.dataTransfer);
+    const request = projectAsset
+      ? {
+          ...projectAsset,
+          face,
+          productionLayer: context,
+        }
+      : null;
+    setProjectAssetDropTarget(null);
+    if (request) {
+      onDropProjectAsset?.(
+        request.assetId,
+        request.face,
+        request.productionLayer,
+      );
+    }
+  };
+
   return (
     <div aria-label="板体与生产层" className="space-y-1" role="tree">
       <button
@@ -216,9 +482,6 @@ export function ProductionLayerTree({
       >
         <CircuitBoard className="size-3.5 text-muted-foreground" />
         <span className="font-medium">板体</span>
-        <span className="ml-auto text-[9px] text-muted-foreground">
-          正反面共享
-        </span>
       </button>
 
       {FACES.map((face) => (
@@ -228,11 +491,8 @@ export function ProductionLayerTree({
           key={face.id}
           role="group"
         >
-          <div className="flex h-7 items-center justify-between px-2">
+          <div className="flex h-7 items-center px-2">
             <span className="text-[11px] font-semibold">{face.label}</span>
-            <span className="text-[9px] text-muted-foreground">
-              {face.physicalLabel}
-            </span>
           </div>
 
           <div className="pb-1">
@@ -256,11 +516,48 @@ export function ProductionLayerTree({
                   className={cn(
                     "rounded-sm",
                     active && "bg-primary/8",
+                    projectAssetDropTarget?.face === face.id &&
+                      projectAssetDropTarget.context === node.context &&
+                      "bg-primary/10 ring-1 ring-inset ring-primary/60",
                   )}
+                  data-project-asset-drop-context={node.context}
+                  data-project-asset-drop-face={face.id}
                   data-testid={`production-layer-${face.id}-${node.context}`}
                   key={node.context}
+                  onDragLeave={(event) => {
+                    if (
+                      event.relatedTarget instanceof Node &&
+                      event.currentTarget.contains(event.relatedTarget)
+                    ) {
+                      return;
+                    }
+                    setProjectAssetDropTarget(null);
+                  }}
+                  onDragOver={(event) =>
+                    handleProjectAssetDragOver(event, face.id, node.context)
+                  }
+                  onDrop={(event) =>
+                    handleProjectAssetDrop(event, face.id, node.context)
+                  }
                 >
-                  <div className="group/layer flex h-8 items-center">
+                  <div
+                    className={cn(
+                      "group/layer flex h-8 items-center",
+                      dropTarget?.layerId === null &&
+                        dropTarget.face === face.id &&
+                        dropTarget.context === node.context &&
+                        dropTarget.valid &&
+                        "bg-primary/10 ring-1 ring-inset ring-primary/60",
+                      dropTarget?.layerId === null &&
+                        dropTarget.face === face.id &&
+                        dropTarget.context === node.context &&
+                        !dropTarget.valid &&
+                        "cursor-not-allowed bg-destructive/10 ring-1 ring-inset ring-destructive/70",
+                    )}
+                    data-layer-drop-context={node.context}
+                    data-layer-drop-face={face.id}
+                    data-production-layer-drop
+                  >
                     <button
                       aria-expanded={isExpanded}
                       aria-label={`${isExpanded ? "收起" : "展开"}${face.label}${node.label}`}
@@ -287,9 +584,6 @@ export function ProductionLayerTree({
                       <span className="min-w-0 flex-1 truncate text-[11px] font-medium">
                         {node.label}
                       </span>
-                      {active && (
-                        <span className="text-[8px] text-primary">焦点</span>
-                      )}
                     </button>
                     <button
                       aria-label={`${inspectionState.visible ? "隐藏" : "显示"}${face.label}${node.label}`}
@@ -305,54 +599,63 @@ export function ProductionLayerTree({
                         <EyeOff className="size-3.5" />
                       )}
                     </button>
-                    <button
-                      aria-label={`${inspectionState.isolated ? "取消隔离" : "隔离"}${face.label}${node.label}`}
-                      aria-pressed={inspectionState.isolated}
-                      className={cn(
-                        "mr-0.5 flex size-7 shrink-0 items-center justify-center text-muted-foreground opacity-0 hover:text-foreground group-hover/layer:opacity-100 focus:opacity-100",
-                        inspectionState.isolated &&
-                          "text-primary opacity-100",
-                      )}
-                      onClick={() =>
-                        onToggleIsolation?.(face.id, node.context)
-                      }
-                      type="button"
-                    >
-                      <Scan className="size-3.5" />
-                    </button>
                   </div>
 
                   {isExpanded && (
                     <div className="pb-1 pl-6 pr-1">
-                      {entries.length === 0 ? (
-                        <p className="h-6 px-2 text-[9px] leading-6 text-muted-foreground/70">
-                          无对象
-                        </p>
-                      ) : (
-                        entries.map(({ layer, mapping, inherited }) => (
+                      {entries.length > 0 &&
+                        entries.map(({ layer, mapping }) => (
                           <div
                             aria-selected={selectedIds[face.id].includes(
                               layer.id,
                             )}
                             className={cn(
-                              "group relative flex min-h-7 items-center rounded text-[10px] hover:bg-accent",
+                              "group relative flex min-h-7 cursor-grab items-center rounded text-[10px] hover:bg-accent active:cursor-grabbing",
                               selectedIds[face.id].includes(layer.id) &&
                                 "bg-accent",
+                              dragging?.layerId === layer.id && "opacity-55",
                               dropTarget?.layerId === layer.id &&
+                                dropTarget.face === face.id &&
+                                dropTarget.context === node.context &&
+                                dropTarget.valid &&
                                 dropTarget.placement === "before" &&
                                 "before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-primary",
                               dropTarget?.layerId === layer.id &&
+                                dropTarget.face === face.id &&
+                                dropTarget.context === node.context &&
+                                dropTarget.valid &&
                                 dropTarget.placement === "after" &&
                                 "after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-primary",
                               dropTarget?.layerId === layer.id &&
+                                dropTarget.face === face.id &&
+                                dropTarget.context === node.context &&
+                                dropTarget.valid &&
                                 dropTarget.placement === "inside" &&
                                 "bg-primary/10 ring-1 ring-inset ring-primary/70",
+                              dropTarget?.layerId === layer.id &&
+                                dropTarget.face === face.id &&
+                                dropTarget.context === node.context &&
+                                !dropTarget.valid &&
+                                "cursor-not-allowed bg-destructive/10 ring-1 ring-inset ring-destructive/70",
                             )}
-                            draggable={!layer.locked}
+                            data-layer-drop-context={node.context}
+                            data-layer-drop-face={face.id}
+                            data-layer-drop-id={layer.id}
                             key={`${node.context}-${layer.id}`}
+                            onClickCapture={(event) => {
+                              if (!suppressClickRef.current) return;
+                              event.preventDefault();
+                              event.stopPropagation();
+                              suppressClickRef.current = false;
+                            }}
                             onContextMenu={(event) => {
                               event.preventDefault();
-                              onSelectSource(face.id, layer.id, event);
+                              onSelectSource(
+                                face.id,
+                                layer.id,
+                                event,
+                                entries.map((entry) => entry.layer.id),
+                              );
                               closeLayerActionMenus();
                               event.currentTarget
                                 .querySelector<HTMLDetailsElement>(
@@ -360,88 +663,43 @@ export function ProductionLayerTree({
                                 )
                                 ?.setAttribute("open", "");
                             }}
-                            onDragEnd={() => {
+                            onPointerCancel={() => {
+                              pointerDragRef.current = null;
+                              document.documentElement.style.removeProperty(
+                                "cursor",
+                              );
                               setDragging(null);
                               setDropTarget(null);
                             }}
-                            onDragOver={(event) => {
-                              const placement = layerDropPlacement(
-                                event,
-                                layer,
-                              );
+                            onPointerDown={(event) => {
                               if (
-                                !canDragInProductionLayer(
-                                  dragging,
-                                  face.id,
-                                  node.context,
-                                ) ||
-                                !resolveLayerDrop(
-                                  layers[face.id],
-                                  dragging!.layerId,
-                                  layer.id,
-                                  placement,
-                                )
+                                layer.locked ||
+                                event.button !== 0 ||
+                                (event.target instanceof Element &&
+                                  event.target.closest(
+                                    "input, details, button:not([data-layer-drag-handle])",
+                                  ))
                               ) {
                                 return;
                               }
-                              event.preventDefault();
-                              event.stopPropagation();
-                              event.dataTransfer.dropEffect = "move";
-                              setDropTarget({
-                                layerId: layer.id,
-                                placement,
-                              });
-                            }}
-                            onDragStart={(event) => {
-                              event.dataTransfer.effectAllowed = "move";
-                              event.dataTransfer.setData(
-                                "text/plain",
-                                layer.id,
-                              );
-                              setDragging({
+                              pointerDragRef.current = {
+                                active: false,
+                                pointerId: event.pointerId,
+                                startX: event.clientX,
+                                startY: event.clientY,
                                 face: face.id,
                                 context: node.context,
                                 layerId: layer.id,
-                              });
+                              };
                             }}
-                            onDrop={(event) => {
-                              const intent =
-                                dropTarget &&
-                                dragging &&
-                                dropTarget.layerId === layer.id
-                                  ? resolveLayerDrop(
-                                      layers[face.id],
-                                      dragging.layerId,
-                                      layer.id,
-                                      dropTarget.placement,
-                                    )
-                                  : null;
-                              if (
-                                !intent ||
-                                !canDragInProductionLayer(
-                                  dragging,
-                                  face.id,
-                                  node.context,
-                                )
-                              ) {
-                                return;
-                              }
-                              event.preventDefault();
-                              event.stopPropagation();
-                              onReorder?.(
-                                face.id,
-                                dragging!.layerId,
-                                intent.newParentId,
-                                intent.newIndex,
-                              );
-                              setDragging(null);
-                              setDropTarget(null);
-                            }}
+                            onPointerMove={handleLayerPointerMove}
+                            onPointerUp={finishLayerPointerDrag}
                             role="treeitem"
                             style={{
                               paddingLeft:
                                 2 +
                                 layerDepth(layers[face.id], layer.id) * 14,
+                              touchAction: "none",
                             }}
                           >
                             {renamingLayerId === layer.id ? (
@@ -468,8 +726,14 @@ export function ProductionLayerTree({
                               <button
                                 aria-label={layer.name}
                                 className="flex min-w-0 flex-1 items-center gap-1.5 px-1 text-left"
+                                data-layer-drag-handle
                                 onClick={(event) =>
-                                  onSelectSource(face.id, layer.id, event)
+                                  onSelectSource(
+                                    face.id,
+                                    layer.id,
+                                    event,
+                                    entries.map((entry) => entry.layer.id),
+                                  )
                                 }
                                 onDoubleClick={() => beginRename(layer)}
                                 onKeyDown={(event) => {
@@ -494,15 +758,6 @@ export function ProductionLayerTree({
                                 <span className="min-w-0 flex-1 truncate">
                                   {layer.name}
                                 </span>
-                                {associationCount.get(layer.id)! > 1 && (
-                                  <span
-                                    className="flex items-center gap-0.5 text-[8px] text-primary"
-                                    title={`同一源对象 ${layer.id}`}
-                                  >
-                                    <Link2 className="size-2.5" />
-                                    关联
-                                  </span>
-                                )}
                                 {mapping?.combine === "subtract" && (
                                   <span className="text-[8px] text-muted-foreground">
                                     减少
@@ -527,75 +782,23 @@ export function ProductionLayerTree({
                               </TreeAction>
                             )}
                             <LayerActionsMenu
-                              canRemoveMapping={
-                                !inherited &&
-                                Boolean(mapping && onRemoveMapping)
-                              }
+                              kind={layer.kind.type}
                               locked={layer.locked}
                               name={layer.name}
-                              onRemoveMapping={() =>
-                                mapping && onRemoveMapping?.(mapping.id)
-                              }
+                              onCopy={() => onCopy?.()}
+                              onCut={() => onCut?.()}
+                              onDelete={() => onDelete?.()}
+                              onDuplicate={() => onDuplicate?.()}
                               onRename={() => beginRename(layer)}
                               onToggleLock={() => onToggleLock?.(layer)}
+                              onToggleVisibility={() =>
+                                onToggleVisibility?.(layer)
+                              }
                               renameEnabled={!layer.locked && Boolean(onRename)}
+                              visible={layer.visible}
                             />
                           </div>
-                        ))
-                      )}
-
-                      {dragging &&
-                        canDragInProductionLayer(
-                          dragging,
-                          face.id,
-                          node.context,
-                        ) && (
-                          <div
-                            className={cn(
-                              "mx-1 flex h-6 items-center justify-center rounded border border-dashed text-[9px] text-muted-foreground",
-                              dropTarget?.layerId === null &&
-                                "border-primary bg-primary/10 text-primary",
-                            )}
-                            data-testid={`production-root-drop-${face.id}-${node.context}`}
-                            onDragOver={(event) => {
-                              const intent = resolveLayerDrop(
-                                layers[face.id],
-                                dragging.layerId,
-                                null,
-                                "rootEnd",
-                              );
-                              if (!intent) return;
-                              event.preventDefault();
-                              event.stopPropagation();
-                              event.dataTransfer.dropEffect = "move";
-                              setDropTarget({
-                                layerId: null,
-                                placement: "rootEnd",
-                              });
-                            }}
-                            onDrop={(event) => {
-                              const intent = resolveLayerDrop(
-                                layers[face.id],
-                                dragging.layerId,
-                                null,
-                                "rootEnd",
-                              );
-                              if (!intent) return;
-                              event.preventDefault();
-                              event.stopPropagation();
-                              onReorder?.(
-                                face.id,
-                                dragging.layerId,
-                                intent.newParentId,
-                                intent.newIndex,
-                              );
-                              setDragging(null);
-                              setDropTarget(null);
-                            }}
-                          >
-                            移至当前生产层顶层
-                          </div>
-                        )}
+                        ))}
 
                       {node.context === "copper" && (
                         <button
@@ -674,17 +877,6 @@ function entriesForProductionLayer(
     }));
 }
 
-function countMappingsBySource(mappings: ProductionMapping[]) {
-  const counts = new Map<string, number>();
-  for (const mapping of mappings) {
-    counts.set(
-      mapping.sourceLayerId,
-      (counts.get(mapping.sourceLayerId) ?? 0) + 1,
-    );
-  }
-  return counts;
-}
-
 function LayerKindIcon({ kind }: { kind: ContentLayer["kind"] }) {
   const icon = {
     image: { Icon: ImageIcon, label: "图片类型" },
@@ -714,35 +906,46 @@ function closeLayerActionMenus() {
     .forEach((details) => details.removeAttribute("open"));
 }
 
-function canDragInProductionLayer(
-  dragging: {
-    face: CardFace;
-    context: WorkContext;
-    layerId: string;
-  } | null,
-  face: CardFace,
-  context: WorkContext,
-) {
-  return Boolean(
-    dragging &&
-      dragging.face === face &&
-      dragging.context === context,
-  );
-}
-
 function layerDropPlacement(
-  event: DragEvent<HTMLDivElement>,
+  clientY: number,
+  row: HTMLElement,
   target: ContentLayer,
 ): LayerDropPlacement {
-  const bounds = event.currentTarget.getBoundingClientRect();
+  const bounds = row.getBoundingClientRect();
   const ratio =
-    bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0.5;
+    bounds.height > 0 ? (clientY - bounds.top) / bounds.height : 0.5;
   if (target.kind.type === "group") {
     if (ratio < 0.3) return "before";
     if (ratio > 0.7) return "after";
     return "inside";
   }
   return ratio < 0.5 ? "before" : "after";
+}
+
+function canMoveLayerToContext(
+  layers: ContentLayer[],
+  sourceLayerId: string,
+  context: WorkContext,
+) {
+  if (context === "copper") return true;
+  const movingIds = layerSubtreeIds(layers, sourceLayerId);
+  return !layers.some(
+    (layer) =>
+      movingIds.has(layer.id) && layer.kind.type === "boardFill",
+  );
+}
+
+export function resolveProjectAssetDropRequest(
+  payload: string,
+  face: CardFace,
+  productionLayer: WorkContext,
+): {
+  assetId: string;
+  face: CardFace;
+  productionLayer: WorkContext;
+} | null {
+  const parsed = parseProjectAssetDragPayload(payload);
+  return parsed ? { ...parsed, face, productionLayer } : null;
 }
 
 export function resolveLayerDrop(
@@ -778,6 +981,35 @@ export function resolveLayerDrop(
       placement === "before"
         ? subtreeEndIndex(remaining, target.id)
         : remaining.findIndex((layer) => layer.id === target.id),
+  };
+}
+
+export function resolveCrossFaceLayerDrop(
+  sourceLayers: ContentLayer[],
+  targetLayers: ContentLayer[],
+  sourceLayerId: string,
+  targetLayerId: string | null,
+  placement: LayerDropPlacement,
+): { newParentId: string | null; newIndex: number } | null {
+  if (!sourceLayers.some((layer) => layer.id === sourceLayerId)) return null;
+  if (placement === "rootEnd") {
+    return { newParentId: null, newIndex: 0 };
+  }
+  const target = targetLayers.find((layer) => layer.id === targetLayerId);
+  if (!target) return null;
+  if (placement === "inside" && target.kind.type !== "group") return null;
+  if (placement === "inside") {
+    return {
+      newParentId: target.id,
+      newIndex: subtreeEndIndex(targetLayers, target.id),
+    };
+  }
+  return {
+    newParentId: target.parentId,
+    newIndex:
+      placement === "before"
+        ? subtreeEndIndex(targetLayers, target.id)
+        : targetLayers.findIndex((layer) => layer.id === target.id),
   };
 }
 
@@ -823,31 +1055,42 @@ function layerDepth(layers: ContentLayer[], layerId: string) {
 }
 
 function LayerActionsMenu({
-  canRemoveMapping,
+  kind,
   locked,
   name,
-  onRemoveMapping,
+  onCopy,
+  onCut,
+  onDelete,
+  onDuplicate,
   onRename,
   onToggleLock,
+  onToggleVisibility,
   renameEnabled,
+  visible,
 }: {
-  canRemoveMapping: boolean;
+  kind: ContentLayer["kind"]["type"];
   locked: boolean;
   name: string;
-  onRemoveMapping: () => void;
+  onCopy: () => void;
+  onCut: () => void;
+  onDelete: () => void;
+  onDuplicate: () => void;
   onRename: () => void;
   onToggleLock: () => void;
+  onToggleVisibility: () => void;
   renameEnabled: boolean;
+  visible: boolean;
 }) {
+  const editableContent = kind !== "boardFill";
+  const duplicable = editableContent && kind !== "group";
   return (
-    <details className="relative shrink-0" data-layer-actions>
-      <summary
-        aria-label={`${name} 更多操作`}
-        className="grid size-6 cursor-pointer list-none place-items-center text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-70 focus:opacity-100 [&::-webkit-details-marker]:hidden"
+    <details className="relative" data-layer-actions>
+      <summary aria-hidden="true" className="hidden" tabIndex={-1} />
+      <div
+        aria-label={`${name} 图层菜单`}
+        className="absolute right-0 top-6 z-30 w-36 rounded-md border border-border bg-card p-1 text-card-foreground shadow-xl"
+        role="menu"
       >
-        <MoreHorizontal className="size-3" />
-      </summary>
-      <div className="absolute right-0 top-6 z-30 w-28 rounded-md border border-border bg-card p-1 text-card-foreground shadow-xl">
         <LayerMenuAction
           disabled={!renameEnabled}
           icon={<Pencil />}
@@ -855,28 +1098,54 @@ function LayerActionsMenu({
           onClick={onRename}
         />
         <LayerMenuAction
+          disabled={locked || !editableContent}
+          icon={<Copy />}
+          label="复制"
+          onClick={onCopy}
+        />
+        <LayerMenuAction
+          disabled={locked || !editableContent}
+          icon={<Scissors />}
+          label="剪切"
+          onClick={onCut}
+        />
+        <LayerMenuAction
+          disabled={locked || !duplicable}
+          icon={<CopyPlus />}
+          label="创建副本"
+          onClick={onDuplicate}
+        />
+        <LayerMenuAction
+          icon={visible ? <EyeOff /> : <Eye />}
+          label={visible ? "隐藏" : "显示"}
+          onClick={onToggleVisibility}
+        />
+        <LayerMenuAction
           icon={locked ? <Unlock /> : <Lock />}
           label={locked ? "解锁" : "锁定"}
           onClick={onToggleLock}
         />
-        {canRemoveMapping && (
-          <LayerMenuAction
-            icon={<Trash2 />}
-            label="移除关联"
-            onClick={onRemoveMapping}
-          />
-        )}
+        <div className="my-1 border-t" role="separator" />
+        <LayerMenuAction
+          destructive
+          disabled={locked}
+          icon={<Trash2 />}
+          label="删除"
+          onClick={onDelete}
+        />
       </div>
     </details>
   );
 }
 
 function LayerMenuAction({
+  destructive = false,
   disabled = false,
   icon,
   label,
   onClick,
 }: {
+  destructive?: boolean;
   disabled?: boolean;
   icon: ReactNode;
   label: string;
@@ -884,12 +1153,16 @@ function LayerMenuAction({
 }) {
   return (
     <button
-      className="flex h-7 w-full items-center gap-2 rounded px-2 text-left text-[10px] hover:bg-accent disabled:opacity-40 [&_svg]:size-3"
+      className={cn(
+        "flex h-7 w-full items-center gap-2 rounded px-2 text-left text-[10px] hover:bg-accent disabled:opacity-40 [&_svg]:size-3",
+        destructive && "text-destructive hover:bg-destructive/10",
+      )}
       disabled={disabled}
       onClick={(event) => {
         onClick();
         event.currentTarget.closest("details")?.removeAttribute("open");
       }}
+      role="menuitem"
       type="button"
     >
       {icon}

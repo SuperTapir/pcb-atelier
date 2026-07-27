@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::{
     AssetId, AtelierDocument, BoardOutline, CardSide, CombineMode, ContentKind, ContentLayer,
     CropRect, DocumentError, FaceProductionLayer, LayerId, MappingId, MechanicalFeature,
-    ProductionTarget, StackupPreset, TextContent, TransformUm,
+    ProductionTarget, SamplingPurpose, StackupPreset, TextContent, TransformUm, TreatmentRecipe,
 };
 
 pub const DEFAULT_PRODUCTION_PIXEL_PITCH_UM: u32 = 25;
@@ -61,6 +61,7 @@ pub enum FabricationPrimitive {
     Image {
         asset_id: AssetId,
         crop: Option<CropRect>,
+        treatment: Option<TreatmentRecipe>,
     },
     Text(TextContent),
     BoardFill {
@@ -288,6 +289,7 @@ pub struct FabricationBuildManifest {
     pub output_sha256: String,
     pub font_fingerprint: String,
     pub pixel_pitch_um: u32,
+    pub sampling_purpose: Option<SamplingPurpose>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,6 +340,13 @@ pub fn compile_fabrication_plan(
             ContentKind::Image(image) => FabricationPrimitive::Image {
                 asset_id: image.asset_id,
                 crop: image.crop.clone(),
+                treatment: mapping.treatment_id.and_then(|treatment_id| {
+                    document
+                        .image_treatments
+                        .iter()
+                        .find(|treatment| treatment.id == treatment_id)
+                        .map(|treatment| treatment.recipe.clone())
+                }),
             },
             ContentKind::Text(text) => FabricationPrimitive::Text(text.clone()),
             ContentKind::BoardFill(fill) => FabricationPrimitive::BoardFill {
@@ -374,6 +383,28 @@ pub fn compile_fabrication_plan(
 pub fn resolve_fabrication_plan(
     plan: &FabricationPlan,
     pixel_pitch_um: u32,
+    rasterizer: &mut impl FabricationRasterizer,
+) -> Result<ResolvedFabricationBoard, FabricationResolveError> {
+    resolve_fabrication_plan_internal(plan, pixel_pitch_um, None, rasterizer)
+}
+
+pub fn resolve_fabrication_plan_for_purpose(
+    plan: &FabricationPlan,
+    purpose: SamplingPurpose,
+    rasterizer: &mut impl FabricationRasterizer,
+) -> Result<ResolvedFabricationBoard, FabricationResolveError> {
+    resolve_fabrication_plan_internal(
+        plan,
+        purpose.default_pixel_pitch_um(),
+        Some(purpose),
+        rasterizer,
+    )
+}
+
+fn resolve_fabrication_plan_internal(
+    plan: &FabricationPlan,
+    pixel_pitch_um: u32,
+    sampling_purpose: Option<SamplingPurpose>,
     rasterizer: &mut impl FabricationRasterizer,
 ) -> Result<ResolvedFabricationBoard, FabricationResolveError> {
     let grid = RasterGrid::for_board(&plan.outline, pixel_pitch_um)?;
@@ -422,6 +453,7 @@ pub fn resolve_fabrication_plan(
             output_sha256,
             font_fingerprint,
             pixel_pitch_um,
+            sampling_purpose,
         },
     })
 }

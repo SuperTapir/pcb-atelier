@@ -36,6 +36,11 @@ export default defineConfig({
       ignored: ["**/src-tauri/**"],
     },
     proxy: {
+      "/__atelier_reset": {
+        target: `http://${process.env.PCB_ATELIER_BRIDGE_ADDR ?? "127.0.0.1:1424"}`,
+        changeOrigin: false,
+        rewrite: () => "/reset",
+      },
       "/__atelier_bridge": {
         target: `http://${process.env.PCB_ATELIER_BRIDGE_ADDR ?? "127.0.0.1:1424"}`,
         changeOrigin: false,

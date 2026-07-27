@@ -132,16 +132,20 @@ for (let index = 0; index < runs; index += 1) {
     cycleGrowthKib <= maximumRssCycleGrowthKib &&
     cycleGrowthRatio <= maximumRssCycleGrowthRatio;
   const dualBoardContractPassed =
-    result.version === 2 &&
+    result.version === 3 &&
     result.scene.boardCount === 2 &&
     result.scene.objectsPerFace === 100 &&
-    result.scene.editableObjects === 200;
+    result.scene.editableObjects === 200 &&
+    result.gestures.panUpdates === 360 &&
+    result.gestures.dragUpdates === 360 &&
+    result.gestures.p95Ms <= 16.7;
 
   results.push({
     run: index + 1,
     wallTimeMs: Date.now() - startedAt,
     scene: result.scene,
     frames: result.frames,
+    gestures: result.gestures,
     renderIsolation: result.renderIsolation,
     webviewHeap: result.memory,
     rss: {
@@ -152,7 +156,10 @@ for (let index = 0; index < runs; index += 1) {
     },
     passed:
       result.checks.fps &&
-      result.checks.p95Frame &&
+      result.checks.gestureP95 &&
+      result.checks.noProductionCompile &&
+      result.checks.noIpc &&
+      result.checks.noSynchronousIpc &&
       result.checks.slowFrameRatio &&
       result.checks.inactiveBoard &&
       dualBoardContractPassed &&
@@ -161,7 +168,7 @@ for (let index = 0; index < runs; index += 1) {
 }
 
 const report = {
-  version: 2,
+  version: 3,
   recordedAt: new Date().toISOString(),
   environment: {
     platform: process.platform,
@@ -179,11 +186,11 @@ const report = {
   },
   thresholds: {
     minimumFps: 45,
-    maximumP95FrameMs: 1000 / 30,
+    maximumGestureUpdateP95Ms: 16.7,
     slowFrameBoundaryMs: 1000 / 45,
     maximumSlowFrameRatio: 0.2,
-    maximumInactiveDrawsPerActiveCycle: 6,
-    maximumInactiveDrawRatio: 0.02,
+    maximumInactiveDrawsPerActiveCycle: 0,
+    maximumInactiveDrawRatio: 0,
     maximumRssCycleGrowthKib,
     maximumRssCycleGrowthRatio,
   },
@@ -194,6 +201,12 @@ const report = {
       results.map((result) => result.frames.averageMs),
     ),
     p95FrameMs: median(results.map((result) => result.frames.p95Ms)),
+    gestureP95Ms: median(
+      results.map((result) => result.gestures.p95Ms),
+    ),
+    gestureMaximumMs: median(
+      results.map((result) => result.gestures.maximumMs),
+    ),
     maximumFrameMs: median(
       results.map((result) => result.frames.maximumMs),
     ),

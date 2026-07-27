@@ -44,7 +44,12 @@ function previewInput(): BoardPreviewInput {
     fabricationInputSha256: "a".repeat(64),
     fabricationOutputSha256: "b".repeat(64),
     textures: {
-      palette: { solderMask: { r: 20, g: 105, b: 65, a: 255 } },
+      palette: {
+        exposedCopper: { r: 211, g: 166, b: 57, a: 255 },
+        solderMask: { r: 20, g: 105, b: 65, a: 255 },
+        silkscreen: { r: 248, g: 246, b: 224, a: 255 },
+        substrate: { r: 176, g: 132, b: 79, a: 255 },
+      },
       front: {
         side: "front",
         widthPx: 2,

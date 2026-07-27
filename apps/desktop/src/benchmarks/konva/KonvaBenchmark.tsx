@@ -19,7 +19,9 @@ import {
 
 import {
   createDualBoardObjects,
+  evaluateGesturePerformance,
   evaluateInactiveBoardDraws,
+  MAXIMUM_GESTURE_UPDATE_P95_MS,
   MAXIMUM_INACTIVE_DRAWS_PER_ACTIVE_CYCLE,
   MAXIMUM_INACTIVE_DRAW_RATIO,
   OBJECTS_PER_FACE,
@@ -27,6 +29,7 @@ import {
   type BenchmarkFace,
   type BoardDrawSample,
   type EditableObject,
+  type GesturePerformanceResult,
   type InactiveBoardDrawResult,
 } from "./dual-board-scene";
 
@@ -40,7 +43,7 @@ const TEXTURES_BY_FACE: Record<BenchmarkFace, number[]> = {
 };
 const THRESHOLDS = {
   minimumFps: 45,
-  maximumP95FrameMs: 1000 / 30,
+  maximumGestureUpdateP95Ms: MAXIMUM_GESTURE_UPDATE_P95_MS,
   slowFrameBoundaryMs: 1000 / 45,
   maximumSlowFrameRatio: 0.2,
   maximumInitialToFinalHeapGrowthBytes: 16 * 1024 * 1024,
@@ -56,6 +59,8 @@ type Phase =
   | "warmup"
   | "front-viewport"
   | "back-viewport"
+  | "front-drag"
+  | "back-drag"
   | "selection-transform"
   | "face-visibility"
   | "complete";
@@ -77,7 +82,7 @@ type MemoryResult =
   | { available: false; reason: string; passed: null };
 
 export type KonvaBenchmarkResult = {
-  version: 2;
+  version: 3;
   userAgent: string;
   viewport: { width: number; height: number; devicePixelRatio: number };
   scene: {
@@ -99,17 +104,31 @@ export type KonvaBenchmarkResult = {
     maximumMs: number;
     slowFrameRatio: number;
   };
+  gestures: GesturePerformanceResult & {
+    panUpdates: number;
+    dragUpdates: number;
+  };
   renderIsolation: InactiveBoardDrawResult;
   memory: MemoryResult;
   thresholds: typeof THRESHOLDS;
   checks: {
     fps: boolean;
-    p95Frame: boolean;
+    gestureP95: boolean;
+    noProductionCompile: boolean;
+    noIpc: boolean;
+    noSynchronousIpc: boolean;
     slowFrameRatio: boolean;
     inactiveBoard: boolean;
     heap: boolean | null;
   };
   passed: boolean;
+};
+
+type GestureSideEffectAudit = {
+  active: boolean;
+  productionCompileCalls: number;
+  ipcCalls: number;
+  synchronousIpcCalls: number;
 };
 
 declare global {
@@ -155,6 +174,12 @@ function makeCanvases(
 const nextFrame = () =>
   new Promise<number>((resolve) => requestAnimationFrame(resolve));
 
+async function settleKonvaDrawQueue() {
+  await nextFrame();
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 20));
+  await nextFrame();
+}
+
 async function gcAndSettle() {
   window.gc?.();
   await nextFrame();
@@ -172,10 +197,101 @@ const bytes = (value: number) => `${number(value / 1024 / 1024)} MB`;
 const otherFace = (face: BenchmarkFace): BenchmarkFace =>
   face === "front" ? "back" : "front";
 
-async function invokeTauri(command: string, args: Record<string, unknown>) {
+async function invokeTauri(
+  command: string,
+  args: Record<string, unknown>,
+  audit?: GestureSideEffectAudit,
+) {
+  if (audit?.active) {
+    audit.ipcCalls += 1;
+    if (isProductionCompileCommand(command)) {
+      audit.productionCompileCalls += 1;
+    }
+  }
   if (!("__TAURI_INTERNALS__" in window)) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke(command, args);
+}
+
+function installGestureRequestAudit(audit: GestureSideEffectAudit) {
+  const originalFetch = window.fetch;
+  window.fetch = async (...args) => {
+    if (audit.active) {
+      const [input, init] = args;
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (url.endsWith("/__atelier_bridge")) {
+        audit.ipcCalls += 1;
+        const command = commandFromBody(init?.body);
+        if (command && isProductionCompileCommand(command)) {
+          audit.productionCompileCalls += 1;
+        }
+      }
+    }
+    return originalFetch(...args);
+  };
+
+  const OriginalXmlHttpRequest = window.XMLHttpRequest;
+  class AuditedXmlHttpRequest extends OriginalXmlHttpRequest {
+    #benchmarkUrl = "";
+    #benchmarkSynchronous = false;
+
+    override open(
+      method: string,
+      url: string | URL,
+      async = true,
+      username?: string | null,
+      password?: string | null,
+    ) {
+      this.#benchmarkUrl = String(url);
+      this.#benchmarkSynchronous = !async;
+      super.open(method, url, async, username, password);
+    }
+
+    override send(body?: Document | XMLHttpRequestBodyInit | null) {
+      if (
+        audit.active &&
+        this.#benchmarkUrl.endsWith("/__atelier_bridge")
+      ) {
+        audit.ipcCalls += 1;
+        if (this.#benchmarkSynchronous) audit.synchronousIpcCalls += 1;
+        const command = commandFromBody(body);
+        if (command && isProductionCompileCommand(command)) {
+          audit.productionCompileCalls += 1;
+        }
+      }
+      super.send(body);
+    }
+  }
+  window.XMLHttpRequest = AuditedXmlHttpRequest;
+
+  return () => {
+    window.fetch = originalFetch;
+    window.XMLHttpRequest = OriginalXmlHttpRequest;
+  };
+}
+
+function commandFromBody(body: BodyInit | Document | null | undefined) {
+  if (typeof body !== "string") return null;
+  try {
+    const parsed = JSON.parse(body) as { command?: unknown };
+    return typeof parsed.command === "string" ? parsed.command : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProductionCompileCommand(command: string) {
+  return (
+    command === "get_production_preview" ||
+    command === "compile_image_treatment" ||
+    command === "production_inspect" ||
+    command === "export_easyeda"
+  );
 }
 
 export function KonvaBenchmark() {
@@ -275,11 +391,26 @@ export function KonvaBenchmark() {
     for (let frame = 0; frame < 90; frame += 1) await nextFrame();
     await gcAndSettle();
     drawCounts.current = { front: 0, back: 0 };
-    await invokeTauri("record_benchmark_checkpoint", { cycle: 0 });
+    const gestureAudit: GestureSideEffectAudit = {
+      active: false,
+      productionCompileCalls: 0,
+      ipcCalls: 0,
+      synchronousIpcCalls: 0,
+    };
+    const restoreGestureRequestAudit =
+      installGestureRequestAudit(gestureAudit);
+    await invokeTauri(
+      "record_benchmark_checkpoint",
+      { cycle: 0 },
+      gestureAudit,
+    );
     const initialHeap = readHeap();
     const heapSamples: HeapSample[] = [];
     const frameDurations: number[] = [];
+    const gestureUpdateDurations: number[] = [];
     const drawSamples: BoardDrawSample[] = [];
+    let panUpdates = 0;
+    let dragUpdates = 0;
     let previous = await nextFrame();
     const recordFrame = async () => {
       const timestamp = await nextFrame();
@@ -290,21 +421,25 @@ export function KonvaBenchmark() {
     for (const face of FACE_ORDER) {
       setActiveFace(face);
       setPhase(face === "front" ? "front-viewport" : "back-viewport");
-      await nextFrame();
+      await settleKonvaDrawQueue();
+      await settleKonvaDrawQueue();
       const inactiveFace = otherFace(face);
       const activeBefore = drawCounts.current[face];
       const inactiveBefore = drawCounts.current[inactiveFace];
       const stage = stages[face].current!;
+      gestureAudit.active = true;
       for (let frame = 0; frame < 180; frame += 1) {
         const progress = frame / 180;
-        const scale =
-          0.82 + Math.sin(progress * Math.PI * 6) * 0.18;
+        const startedAt = performance.now();
+        const scale = 0.82 + Math.sin(progress * Math.PI * 6) * 0.18;
         stage.scale({ x: scale, y: scale });
         stage.position({
           x: Math.sin(progress * Math.PI * 8) * 20,
           y: Math.cos(progress * Math.PI * 6) * 28,
         });
-        stage.batchDraw();
+        stage.draw();
+        gestureUpdateDurations.push(performance.now() - startedAt);
+        panUpdates += 1;
         await recordFrame();
       }
       drawSamples.push({
@@ -314,6 +449,41 @@ export function KonvaBenchmark() {
           drawCounts.current[inactiveFace] - inactiveBefore,
       });
     }
+
+    for (const face of FACE_ORDER) {
+      setActiveFace(face);
+      setPhase(face === "front" ? "front-drag" : "back-drag");
+      await settleKonvaDrawQueue();
+      await settleKonvaDrawQueue();
+      const inactiveFace = otherFace(face);
+      const activeBefore = drawCounts.current[face];
+      const inactiveBefore = drawCounts.current[inactiveFace];
+      const object = objects[face][0]!;
+      const node = nodes.current[face].get(object.id)!;
+      const originalPosition = node.position();
+      for (let frame = 0; frame < 180; frame += 1) {
+        const progress = frame / 180;
+        const startedAt = performance.now();
+        node.position({
+          x: originalPosition.x + Math.sin(progress * Math.PI * 6) * 18,
+          y: originalPosition.y + Math.cos(progress * Math.PI * 4) * 14,
+        });
+        node.getLayer()?.draw();
+        gestureUpdateDurations.push(performance.now() - startedAt);
+        dragUpdates += 1;
+        await recordFrame();
+      }
+      node.position(originalPosition);
+      node.getLayer()?.draw();
+      drawSamples.push({
+        activeFace: face,
+        activeDraws: drawCounts.current[face] - activeBefore,
+        inactiveDraws:
+          drawCounts.current[inactiveFace] - inactiveBefore,
+      });
+    }
+    gestureAudit.active = false;
+    restoreGestureRequestAudit();
 
     setPhase("selection-transform");
     for (const face of FACE_ORDER) {
@@ -369,9 +539,13 @@ export function KonvaBenchmark() {
       });
       if (cycle % 4 === 3) {
         await gcAndSettle();
-        await invokeTauri("record_benchmark_checkpoint", {
-          cycle: cycle + 1,
-        });
+        await invokeTauri(
+          "record_benchmark_checkpoint",
+          {
+            cycle: cycle + 1,
+          },
+          gestureAudit,
+        );
         const usedBytes = readHeap();
         if (usedBytes !== null)
           heapSamples.push({ cycle: cycle + 1, usedBytes });
@@ -387,9 +561,13 @@ export function KonvaBenchmark() {
     }
     setActiveFace("front");
     await gcAndSettle();
-    await invokeTauri("record_benchmark_checkpoint", {
-      cycle: FACE_VISIBILITY_CYCLES + 1,
-    });
+    await invokeTauri(
+      "record_benchmark_checkpoint",
+      {
+        cycle: FACE_VISIBILITY_CYCLES + 1,
+      },
+      gestureAudit,
+    );
     const finalHeap = readHeap();
 
     const durationMs = frameDurations.reduce(
@@ -404,6 +582,13 @@ export function KonvaBenchmark() {
       ).length / frameDurations.length;
     const fps = 1000 / averageMs;
     const renderIsolation = evaluateInactiveBoardDraws(drawSamples);
+    const gesturePerformance = evaluateGesturePerformance({
+      editableObjects: TOTAL_EDITABLE_OBJECTS,
+      updateDurationsMs: gestureUpdateDurations,
+      productionCompileCalls: gestureAudit.productionCompileCalls,
+      ipcCalls: gestureAudit.ipcCalls,
+      synchronousIpcCalls: gestureAudit.synchronousIpcCalls,
+    });
     let memory: MemoryResult;
     if (initialHeap === null || finalHeap === null) {
       memory = {
@@ -447,14 +632,19 @@ export function KonvaBenchmark() {
     }
     const checks = {
       fps: fps >= THRESHOLDS.minimumFps,
-      p95Frame: p95Ms <= THRESHOLDS.maximumP95FrameMs,
+      gestureP95: gesturePerformance.checks.p95,
+      noProductionCompile:
+        gesturePerformance.checks.noProductionCompile,
+      noIpc: gesturePerformance.checks.noIpc,
+      noSynchronousIpc:
+        gesturePerformance.checks.noSynchronousIpc,
       slowFrameRatio:
         slowFrameRatio <= THRESHOLDS.maximumSlowFrameRatio,
       inactiveBoard: renderIsolation.passed,
       heap: memory.passed,
     };
     const benchmarkResult: KonvaBenchmarkResult = {
-      version: 2,
+      version: 3,
       userAgent: navigator.userAgent,
       viewport: {
         width: window.innerWidth,
@@ -482,13 +672,21 @@ export function KonvaBenchmark() {
         maximumMs: Math.max(...frameDurations),
         slowFrameRatio,
       },
+      gestures: {
+        ...gesturePerformance,
+        panUpdates,
+        dragUpdates,
+      },
       renderIsolation,
       memory,
       thresholds: THRESHOLDS,
       checks,
       passed:
         checks.fps &&
-        checks.p95Frame &&
+        checks.gestureP95 &&
+        checks.noProductionCompile &&
+        checks.noIpc &&
+        checks.noSynchronousIpc &&
         checks.slowFrameRatio &&
         checks.inactiveBoard &&
         checks.heap !== false,
@@ -570,8 +768,16 @@ export function KonvaBenchmark() {
               <div className="mt-3 space-y-2 text-sm">
                 <Metric label="平均 FPS" value={number(result.frames.fps)} />
                 <Metric
-                  label="平均 / P95"
+                  label="帧间隔平均 / P95"
                   value={`${number(result.frames.averageMs)} / ${number(result.frames.p95Ms)} ms`}
+                />
+                <Metric
+                  label="手势更新平均 / P95"
+                  value={`${number(result.gestures.averageMs)} / ${number(result.gestures.p95Ms)} ms`}
+                />
+                <Metric
+                  label="手势编译 / IPC"
+                  value={`${result.gestures.productionCompileCalls} / ${result.gestures.ipcCalls}`}
                 />
                 <Metric
                   label="最大帧"

@@ -3,8 +3,8 @@ use std::io::Cursor;
 use atelier_core::{
     AtelierDocument, BoardFillContent, CardSide, CombineMode, CommandHistory, ContentKind,
     ContentLayer, DocumentCommand, DocumentError, FabricationPrimitive, FaceProductionLayer,
-    PROJECT_SCHEMA_VERSION, ProductionMapping, ProductionTarget, ProjectBundle,
-    ProjectBundleRasterizer, TransformUm, compile_fabrication_plan, resolve_fabrication_plan,
+    ProductionMapping, ProductionTarget, ProjectBundle, ProjectBundleRasterizer, TransformUm,
+    compile_fabrication_plan, resolve_fabrication_plan,
 };
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 
@@ -231,7 +231,7 @@ fn board_fill_clearance_follows_a_rounded_board_outline() {
 }
 
 #[test]
-fn board_fill_requires_the_schema_version_that_introduced_it() {
+fn project_rejects_an_older_unreleased_schema_before_interpreting_features() {
     let mut legacy = AtelierDocument::new_card("旧版本", 64_000, 100_000);
     legacy.schema_version = 1;
     legacy
@@ -242,10 +242,7 @@ fn board_fill_requires_the_schema_version_that_introduced_it() {
     assert!(matches!(
         legacy
             .validate()
-            .expect_err("v1 cannot claim board-fill support"),
-        DocumentError::FeatureRequiresSchema {
-            required: PROJECT_SCHEMA_VERSION,
-            ..
-        }
+            .expect_err("old unreleased schema is unsupported"),
+        DocumentError::UnsupportedSchema(1)
     ));
 }

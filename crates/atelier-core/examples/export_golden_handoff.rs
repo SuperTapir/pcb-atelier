@@ -7,8 +7,8 @@ mod support;
 use std::path::PathBuf;
 
 use atelier_core::{
-    ProjectBundleRasterizer, compile_fabrication_plan, export_easyeda_handoff,
-    resolve_fabrication_plan,
+    ProjectBundleRasterizer, SamplingPurpose, compile_fabrication_plan, export_easyeda_handoff,
+    resolve_fabrication_plan_for_purpose,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,8 +20,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _source_markers = (fixture.front_text_id, fixture.back_text_id);
     let plan = compile_fabrication_plan(&fixture.bundle.document)?;
     let mut rasterizer = ProjectBundleRasterizer::new(&fixture.bundle)?;
-    let board = resolve_fabrication_plan(&plan, 500, &mut rasterizer)?;
-    let report = export_easyeda_handoff(&destination, "Golden card", &board)?;
+    let board = resolve_fabrication_plan_for_purpose(
+        &plan,
+        SamplingPurpose::FormalProduction,
+        &mut rasterizer,
+    )?;
+    let report = export_easyeda_handoff(&destination, &fixture.bundle, &board)?;
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

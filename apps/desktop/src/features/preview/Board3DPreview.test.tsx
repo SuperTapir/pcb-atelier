@@ -13,6 +13,7 @@ import {
   board3DPreviewRenderer,
   configureBoardFaceMaterial,
   configureBoardTexture,
+  rgba8ToCssHex,
 } from "@/features/preview/Board3DPreview";
 import type { BoardPreviewInput } from "@/features/preview/board-preview-renderer";
 
@@ -24,8 +25,16 @@ describe("Board3DPreview", () => {
 
     expect(markup).toContain('data-testid="board-3d-preview"');
     expect(markup).toContain('aria-label="3D 成板效果预览"');
+    expect(markup).toContain('data-substrate-rgb="176,132,79"');
+    expect(markup).toContain('data-exposed-copper-rgb="211,166,57"');
     expect(markup).not.toContain("input");
     expect(markup).not.toContain("textarea");
+  });
+
+  it("uses the resolved manufacturing palette for non-textured board edges", () => {
+    expect(rgba8ToCssHex({ r: 176, g: 132, b: 79, a: 255 })).toBe(
+      "#b0844f",
+    );
   });
 
   it("is available through the replaceable renderer interface", () => {
@@ -72,7 +81,12 @@ function previewInput(): BoardPreviewInput {
     fabricationInputSha256: "a".repeat(64),
     fabricationOutputSha256: "b".repeat(64),
     textures: {
-      palette: { solderMask: { r: 35, g: 67, b: 135, a: 255 } },
+      palette: {
+        exposedCopper: { r: 211, g: 166, b: 57, a: 255 },
+        solderMask: { r: 35, g: 67, b: 135, a: 255 },
+        silkscreen: { r: 248, g: 246, b: 224, a: 255 },
+        substrate: { r: 176, g: 132, b: 79, a: 255 },
+      },
       front: { side: "front", widthPx: 2, heightPx: 2, pngDataUrl },
       back: { side: "back", widthPx: 2, heightPx: 2, pngDataUrl },
     },

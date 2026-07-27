@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
@@ -6,12 +7,16 @@ use std::{
 
 use atelier_core::{
     AssetId, AssetReference, AtelierDocument, BoardOutline, CardSide, CombineMode, CommandHistory,
-    CommandOutcome, ContentKind, ContentLayer, DocumentCommand, DocumentDiagnostic,
-    EasyedaHandoffExportReport, FaceProductionLayer, ImageContent, LayerId, MappingId,
-    PreviewPalette, PreviewTexture, ProductionLayerPreviewTexture, ProductionMapping,
-    ProductionTarget, ProjectBundle, ProjectBundleRasterizer, ResolvedFabricationBoard,
-    StackupPreset, TextContent, TextLayout, TransformUm, compile_fabrication_plan,
-    export_easyeda_handoff, resolve_fabrication_plan, system_font_families,
+    CommandOutcome, CompiledImageTreatment, ContentKind, ContentLayer, DocumentCommand,
+    DocumentDiagnostic, EasyedaHandoffExportReport, FaceProductionLayer, ImageProductionMode,
+    ImageTreatment, LayerId, LayerTransferMode, LayerTransform, ManufacturerProfileSnapshot,
+    MappingId, PreviewPalette, PreviewTexture, ProductionLayerPreviewTexture, ProductionMapping,
+    ProductionTarget, ProjectAssetCommand, ProjectAssetCommandOutcome, ProjectBundle,
+    ProjectBundleRasterizer, ResolvedFabricationBoard, SamplingPurpose, StackupPreset, TextContent,
+    TextLayout, TransformUm, TreatmentCompileRequest, TreatmentId, TreatmentRecipe,
+    build_production_trace, compile_fabrication_plan, compile_image_treatment,
+    export_easyeda_handoff, resolve_fabrication_plan, resolve_fabrication_plan_for_purpose,
+    system_font_families, treatment_cache_key,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use image::{
@@ -20,6 +25,10 @@ use image::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+mod processing_scheduler;
+
+use processing_scheduler::{TreatmentJobError, TreatmentJobKey, TreatmentProcessingScheduler};
 
 pub const WORKSPACE_CONTRACT_VERSION: &str = "pcb-atelier-workspace-v1";
 
@@ -65,7 +74,9 @@ struct WorkspaceDocumentView {
     front_layers: Vec<ContentLayer>,
     back_layers: Vec<ContentLayer>,
     assets: Vec<AssetReference>,
+    image_treatments: Vec<ImageTreatment>,
     mappings: Vec<ProductionMapping>,
+    manufacturer_profile: ManufacturerProfileSnapshot,
     history: HistoryAvailabilityView,
 }
 
@@ -150,10 +161,17 @@ struct FontCatalogView {
     fallback_family: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeImageFileView {
+    name: String,
+    media_type: String,
+    bytes: Vec<u8>,
+}
+
 // Interactive previews trade manufacturing-grid detail for responsive inspection.
-// EasyEDA export remains fixed at `EASYEDA_EXPORT_PITCH_UM` (25 µm).
+// EasyEDA export uses the explicit FormalProduction resolver.
 const INTERACTIVE_PREVIEW_PITCH_UM: u32 = 200;
-const EASYEDA_EXPORT_PITCH_UM: u32 = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,7 +360,9 @@ fn workspace_document_view(
         front_layers: document.front.layers.clone(),
         back_layers: document.back.layers.clone(),
         assets: document.assets.clone(),
+        image_treatments: document.image_treatments.clone(),
         mappings: document.mappings.clone(),
+        manufacturer_profile: document.manufacturer_profile.clone(),
         history: HistoryAvailabilityView {
             can_undo: history.undo_depth() > 0,
             can_redo: history.redo_depth() > 0,
@@ -363,6 +383,7 @@ pub struct WorkspaceService {
     session: WorkspaceSession,
     revision: u64,
     resolved_board_cache: Arc<Mutex<ResolvedBoardCache>>,
+    treatment_scheduler: Arc<TreatmentProcessingScheduler>,
 }
 
 #[derive(Debug, Default)]
@@ -383,6 +404,7 @@ impl WorkspaceService {
             session: WorkspaceSession::new(document),
             revision: 0,
             resolved_board_cache: Arc::new(Mutex::new(ResolvedBoardCache::default())),
+            treatment_scheduler: Arc::new(TreatmentProcessingScheduler::new(2)),
         }
     }
 
@@ -398,6 +420,7 @@ impl WorkspaceService {
             Ok((payload, mutated)) => {
                 if mutated {
                     self.revision = self.revision.saturating_add(1);
+                    self.treatment_scheduler.advance_revision(self.revision);
                 }
                 WorkspaceBridgeResponse {
                     contract_version: WORKSPACE_CONTRACT_VERSION,
@@ -418,11 +441,20 @@ impl WorkspaceService {
             },
             revision: self.revision,
             resolved_board_cache: Arc::clone(&self.resolved_board_cache),
+            treatment_scheduler: Arc::clone(&self.treatment_scheduler),
         }
     }
 
     pub fn should_use_read_snapshot(command: &str) -> bool {
-        matches!(command, "get_board_preview" | "get_production_preview")
+        matches!(
+            command,
+            "get_board_preview"
+                | "get_production_preview"
+                | "compile_image_treatment"
+                | "preview_image_import"
+                | "validate_manufacturer_profile"
+                | "get_production_trace"
+        )
     }
 
     fn resolved_interactive_board(&self) -> Result<ResolvedFabricationBoard, String> {
@@ -495,10 +527,71 @@ impl WorkspaceService {
                     .map_err(|error| format!("invalid assetId: {error}"))?;
                 self.session.asset_bytes(asset_id).and_then(to_json)
             }
+            "import_project_asset" => {
+                let (view, changed) = self.session.import_asset(decode_request(&args)?)?;
+                return serialize_response(view, changed);
+            }
+            "move_project_asset" => {
+                let (view, changed) = self.session.move_project_asset(decode_request(&args)?)?;
+                return serialize_response(view, changed);
+            }
+            "replace_all_asset_references" => {
+                let (view, changed) = self
+                    .session
+                    .replace_all_asset_references(decode_request(&args)?)?;
+                return serialize_response(view, changed);
+            }
+            "delete_project_asset" => {
+                let view = self.session.delete_project_asset(decode_request(&args)?)?;
+                return serialize_response(view, true);
+            }
+            "cleanup_unused_assets" => {
+                let (view, changed) = self.session.cleanup_unused_assets()?;
+                return serialize_response(view, changed);
+            }
             "insert_image_asset" => self
                 .session
                 .insert_image(decode_request(&args)?)
                 .and_then(to_json),
+            "insert_image_treatment" => self
+                .session
+                .insert_treatment(decode_request(&args)?)
+                .and_then(to_json),
+            "set_treatment_recipe" => self
+                .session
+                .set_treatment_recipe(decode_request(&args)?)
+                .and_then(to_json),
+            "set_image_production_mode" => self
+                .session
+                .set_image_production_mode(decode_request(&args)?)
+                .and_then(to_json),
+            "compile_image_treatment" => {
+                return serialize_response(self.compile_treatment(decode_request(&args)?)?, false);
+            }
+            "preview_image_import" => {
+                return serialize_response(
+                    self.preview_image_import(decode_request(&args)?)?,
+                    false,
+                );
+            }
+            "confirm_image_import" => self
+                .session
+                .confirm_image_import(decode_request(&args)?)
+                .and_then(to_json),
+            "validate_manufacturer_profile" => {
+                let request: ValidateManufacturerRequest = decode_request(&args)?;
+                return serialize_response(
+                    ManufacturerValidationView::from_profile(request.profile),
+                    false,
+                );
+            }
+            "set_manufacturer_profile" => self
+                .session
+                .set_manufacturer_profile(decode_request(&args)?)
+                .and_then(to_json),
+            "get_production_trace" => {
+                return serialize_response(self.production_trace()?, false);
+            }
             "insert_text_layer" => self
                 .session
                 .insert_text(decode_request(&args)?)
@@ -520,12 +613,48 @@ impl WorkspaceService {
                     })
                     .and_then(to_json)
             }
+            "delete_layer" => {
+                let request: LayerIdRequest = decode_request(&args)?;
+                self.session
+                    .execute(DocumentCommand::DeleteLayer {
+                        layer_id: request.layer_id,
+                    })
+                    .and_then(to_json)
+            }
+            "delete_layers" => {
+                let request: LayerIdsRequest = decode_request(&args)?;
+                self.session
+                    .execute(DocumentCommand::DeleteLayers {
+                        layer_ids: request.layer_ids,
+                    })
+                    .and_then(to_json)
+            }
+            "duplicate_layer" => self
+                .session
+                .duplicate_layer(decode_request(&args)?)
+                .and_then(to_json),
+            "transfer_layers" => self
+                .session
+                .transfer_layers(decode_request(&args)?)
+                .and_then(to_json),
+            "paste_layers" => self
+                .session
+                .paste_layers(decode_request(&args)?)
+                .and_then(to_json),
             "transform_layer" => {
                 let request: TransformLayerRequest = decode_request(&args)?;
                 self.session
                     .execute(DocumentCommand::TransformLayer {
                         layer_id: request.layer_id,
                         transform: request.transform,
+                    })
+                    .and_then(to_json)
+            }
+            "transform_layers" => {
+                let request: TransformLayersRequest = decode_request(&args)?;
+                self.session
+                    .execute(DocumentCommand::TransformLayers {
+                        transforms: request.transforms,
                     })
                     .and_then(to_json)
             }
@@ -560,6 +689,18 @@ impl WorkspaceService {
                         layer_id: request.layer_id,
                         new_parent_id: request.new_parent_id,
                         new_index: request.new_index,
+                    })
+                    .and_then(to_json)
+            }
+            "move_layer" => {
+                let request: MoveLayerRequest = decode_request(&args)?;
+                self.session
+                    .execute(DocumentCommand::MoveLayer {
+                        layer_id: request.layer_id,
+                        new_parent_id: request.new_parent_id,
+                        new_index: request.new_index,
+                        from_target: ProductionTarget::new(request.side, request.from_layer),
+                        to_target: ProductionTarget::new(request.side, request.to_layer),
                     })
                     .and_then(to_json)
             }
@@ -618,6 +759,128 @@ impl WorkspaceService {
             error: Some(error),
         }
     }
+
+    fn compile_treatment(
+        &self,
+        request: CompileTreatmentRequest,
+    ) -> Result<TreatmentCompileView, String> {
+        let treatment = self
+            .session
+            .bundle
+            .document
+            .image_treatments
+            .iter()
+            .find(|treatment| treatment.id == request.treatment_id)
+            .ok_or_else(|| format!("image treatment not found: {}", request.treatment_id))?
+            .clone();
+        let asset = self
+            .session
+            .bundle
+            .document
+            .assets
+            .iter()
+            .find(|asset| asset.id == treatment.asset_id)
+            .ok_or_else(|| format!("asset not found: {}", treatment.asset_id))?
+            .clone();
+        let bytes = self
+            .session
+            .bundle
+            .asset_bytes(asset.id)
+            .ok_or_else(|| format!("asset bytes not found: {}", asset.id))?
+            .to_vec();
+        let compile_request = TreatmentCompileRequest {
+            physical_width_um: request.physical_width_um,
+            physical_height_um: request.physical_height_um,
+            pixel_pitch_um: request
+                .pixel_pitch_um
+                .unwrap_or_else(|| request.purpose.default_pixel_pitch_um()),
+            revision: self.revision,
+            purpose: request.purpose,
+        };
+        let recipe_fingerprint = treatment.recipe.fingerprint();
+        let key = TreatmentJobKey {
+            treatment_id: treatment.id,
+            revision: self.revision,
+            recipe_fingerprint: recipe_fingerprint.clone(),
+            cache_key: treatment_cache_key(
+                &asset.sha256,
+                &treatment.recipe,
+                request.physical_width_um,
+                request.physical_height_um,
+                compile_request.pixel_pitch_um,
+            ),
+        };
+        let recipe = treatment.recipe;
+        let compiled = self
+            .treatment_scheduler
+            .compile(key, move || {
+                compile_image_treatment(&bytes, &recipe, compile_request)
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| match error {
+                TreatmentJobError::Cancelled => {
+                    "image treatment compile was cancelled by a newer request".to_owned()
+                }
+                TreatmentJobError::Stale => {
+                    "image treatment compile result is stale and was discarded".to_owned()
+                }
+                TreatmentJobError::Failed(message) => message,
+            })?;
+        TreatmentCompileView::from_compiled(&compiled)
+    }
+
+    fn preview_image_import(
+        &self,
+        request: PreviewImageImportRequest,
+    ) -> Result<TreatmentCompileView, String> {
+        let compile_request = TreatmentCompileRequest::for_purpose(
+            request.physical_width_um,
+            request.physical_height_um,
+            self.revision.saturating_add(request.draft_revision),
+            SamplingPurpose::InteractiveProxy,
+        );
+        let recipe_fingerprint = request.recipe.fingerprint();
+        let key = TreatmentJobKey {
+            treatment_id: request.draft_id,
+            revision: compile_request.revision,
+            recipe_fingerprint: recipe_fingerprint.clone(),
+            cache_key: format!(
+                "draft:{}:{}:{}:{}:{}",
+                request.draft_id,
+                request.bytes.len(),
+                request.physical_width_um,
+                request.physical_height_um,
+                recipe_fingerprint,
+            ),
+        };
+        let bytes = request.bytes;
+        let recipe = request.recipe;
+        let compiled = self
+            .treatment_scheduler
+            .compile(key, move || {
+                compile_image_treatment(&bytes, &recipe, compile_request)
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| match error {
+                TreatmentJobError::Cancelled => {
+                    "image import preview was cancelled by a newer recipe".to_owned()
+                }
+                TreatmentJobError::Stale => {
+                    "image import preview is stale and was discarded".to_owned()
+                }
+                TreatmentJobError::Failed(message) => message,
+            })?;
+        TreatmentCompileView::from_compiled(&compiled)
+    }
+
+    fn production_trace(&self) -> Result<atelier_core::ProductionTraceReport, String> {
+        let resolved = self.resolved_interactive_board()?;
+        Ok(build_production_trace(
+            self.revision,
+            &self.session.bundle.document,
+            &resolved,
+        ))
+    }
 }
 
 fn decode_request<T: for<'de> Deserialize<'de>>(args: &Value) -> Result<T, String> {
@@ -671,7 +934,147 @@ impl WorkspaceSession {
             .map_err(|error| format!("无法保存 PCB Atelier 工程：{error}"))
     }
 
+    fn import_asset(
+        &mut self,
+        request: ImportAssetRequest,
+    ) -> Result<(AssetMutationView, bool), String> {
+        let previous_count = self.bundle.document.assets.len();
+        let asset_id = self
+            .bundle
+            .embed_asset(
+                request.original_filename,
+                request.media_type,
+                request.pixel_width,
+                request.pixel_height,
+                request.bytes,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((
+            AssetMutationView {
+                document: self.document_view(),
+                asset_id,
+                reused: self.bundle.document.assets.len() == previous_count,
+            },
+            self.bundle.document.assets.len() != previous_count,
+        ))
+    }
+
+    fn replace_all_asset_references(
+        &mut self,
+        request: ReplaceAllAssetReferencesRequest,
+    ) -> Result<(AssetReferencesMutationView, bool), String> {
+        let outcome = ProjectAssetCommand::ReplaceAllReferences {
+            original_asset_id: request.original_asset_id,
+            replacement_asset_id: request.replacement_asset_id,
+        }
+        .apply(&mut self.bundle)
+        .map_err(|error| error.to_string())?;
+        let ProjectAssetCommandOutcome::ReferencesReplaced {
+            original_asset_id,
+            replacement_asset_id,
+            instance_count,
+            treatment_count,
+        } = outcome
+        else {
+            return Err("replace all asset references returned an unexpected outcome".to_owned());
+        };
+        let changed = instance_count + treatment_count > 0;
+        Ok((
+            AssetReferencesMutationView {
+                document: self.document_view(),
+                original_asset_id,
+                replacement_asset_id,
+                replaced_instance_count: instance_count,
+                replaced_treatment_count: treatment_count,
+            },
+            changed,
+        ))
+    }
+
+    fn move_project_asset(
+        &mut self,
+        request: MoveProjectAssetRequest,
+    ) -> Result<(AssetFolderMutationView, bool), String> {
+        let previous_folder_path = self
+            .bundle
+            .document
+            .assets
+            .iter()
+            .find(|asset| asset.id == request.asset_id)
+            .map(|asset| asset.folder_path.clone());
+        let outcome = ProjectAssetCommand::MoveToFolder {
+            asset_id: request.asset_id,
+            folder_path: request.folder_path,
+        }
+        .apply(&mut self.bundle)
+        .map_err(|error| error.to_string())?;
+        let ProjectAssetCommandOutcome::AssetMoved {
+            asset_id,
+            folder_path,
+        } = outcome
+        else {
+            return Err("move project asset returned an unexpected outcome".to_owned());
+        };
+        let changed = previous_folder_path.is_some_and(|previous| previous != folder_path);
+        Ok((
+            AssetFolderMutationView {
+                document: self.document_view(),
+                asset_id,
+                folder_path,
+            },
+            changed,
+        ))
+    }
+
+    fn delete_project_asset(
+        &mut self,
+        request: ProjectAssetIdRequest,
+    ) -> Result<AssetDeletionMutationView, String> {
+        let outcome = ProjectAssetCommand::Delete {
+            asset_id: request.asset_id,
+        }
+        .apply(&mut self.bundle)
+        .map_err(|error| error.to_string())?;
+        let ProjectAssetCommandOutcome::AssetDeleted { asset_id } = outcome else {
+            return Err("delete project asset returned an unexpected outcome".to_owned());
+        };
+        Ok(AssetDeletionMutationView {
+            document: self.document_view(),
+            deleted_asset_id: asset_id,
+        })
+    }
+
+    fn cleanup_unused_assets(&mut self) -> Result<(AssetCleanupMutationView, bool), String> {
+        let outcome = ProjectAssetCommand::CleanupUnused
+            .apply(&mut self.bundle)
+            .map_err(|error| error.to_string())?;
+        let ProjectAssetCommandOutcome::UnusedAssetsRemoved { asset_ids } = outcome else {
+            return Err("cleanup unused assets returned an unexpected outcome".to_owned());
+        };
+        let changed = !asset_ids.is_empty();
+        Ok((
+            AssetCleanupMutationView {
+                document: self.document_view(),
+                removed_asset_ids: asset_ids,
+            },
+            changed,
+        ))
+    }
+
     fn insert_image(&mut self, request: ImageAssetRequest) -> Result<LayerMutationView, String> {
+        let placement_center = request
+            .placement_center_um
+            .as_ref()
+            .map(|point| (point.x_um, point.y_um));
+        if request.replace_layer_id.is_none() {
+            if let Some((x_um, y_um)) = placement_center {
+                let board_width_um = i64::from(self.bundle.document.board.width_um());
+                let board_height_um = i64::from(self.bundle.document.board.height_um());
+                if !(0..=board_width_um).contains(&x_um) || !(0..=board_height_um).contains(&y_um) {
+                    return Err("图片落点必须位于板框内".to_owned());
+                }
+            }
+        }
         let previous_bundle = self.bundle.clone();
         let asset_id = self
             .bundle
@@ -685,24 +1088,22 @@ impl WorkspaceSession {
             .map_err(|error| error.to_string())?;
 
         let layer_id = if let Some(layer_id) = request.replace_layer_id {
-            let command = DocumentCommand::SetImageContent {
-                layer_id,
-                image: ImageContent {
-                    asset_id,
-                    crop: None,
-                },
-            };
+            let command = DocumentCommand::ReplaceImageInstanceAsset { layer_id, asset_id };
             if let Err(error) = self.history.execute(&mut self.bundle.document, command) {
                 self.bundle = previous_bundle;
                 return Err(error.to_string());
             }
             layer_id
         } else {
-            let transform = fit_image_transform(
+            let mut transform = fit_image_transform(
                 &self.bundle.document,
                 request.pixel_width,
                 request.pixel_height,
             );
+            if let Some((x_um, y_um)) = placement_center {
+                transform.x_um = x_um - i64::from(transform.width_um) / 2;
+                transform.y_um = y_um - i64::from(transform.height_um) / 2;
+            }
             let layer = ContentLayer::new_image(request.original_filename, asset_id, transform);
             let layer_id = layer.id;
             let index = face_layers(&self.bundle.document, request.side).len();
@@ -721,6 +1122,146 @@ impl WorkspaceSession {
         Ok(LayerMutationView {
             document: self.document_view(),
             layer_id,
+        })
+    }
+
+    fn insert_treatment(
+        &mut self,
+        request: InsertTreatmentRequest,
+    ) -> Result<TreatmentMutationView, String> {
+        validate_color_original_asset(&self.bundle, request.asset_id, request.production_mode)?;
+        let mut treatment = ImageTreatment::new(request.asset_id, request.recipe);
+        treatment.production_mode = request.production_mode;
+        let treatment_id = treatment.id;
+        self.execute(DocumentCommand::InsertImageTreatment { treatment })?;
+        Ok(TreatmentMutationView {
+            document: self.document_view(),
+            treatment_id,
+        })
+    }
+
+    fn confirm_image_import(
+        &mut self,
+        request: ConfirmImageImportRequest,
+    ) -> Result<ConfirmedImageImportView, String> {
+        if let Some(point) = &request.placement_center_um {
+            let board_width_um = i64::from(self.bundle.document.board.width_um());
+            let board_height_um = i64::from(self.bundle.document.board.height_um());
+            if !(0..=board_width_um).contains(&point.x_um)
+                || !(0..=board_height_um).contains(&point.y_um)
+            {
+                return Err("图片落点必须位于板框内".to_owned());
+            }
+        }
+
+        let mut staged_bundle = self.bundle.clone();
+        let asset_id = staged_bundle
+            .embed_asset(
+                &request.original_filename,
+                &request.media_type,
+                request.pixel_width,
+                request.pixel_height,
+                request.bytes,
+            )
+            .map_err(|error| error.to_string())?;
+        let new_asset = if self
+            .bundle
+            .document
+            .assets
+            .iter()
+            .any(|asset| asset.id == asset_id)
+        {
+            None
+        } else {
+            staged_bundle
+                .document
+                .assets
+                .iter()
+                .find(|asset| asset.id == asset_id)
+                .cloned()
+        };
+        validate_color_original_asset(&staged_bundle, asset_id, request.production_mode)?;
+
+        let mut transform = fit_image_transform(
+            &self.bundle.document,
+            request.pixel_width,
+            request.pixel_height,
+        );
+        if let Some(point) = request.placement_center_um {
+            transform.x_um = point.x_um - i64::from(transform.width_um) / 2;
+            transform.y_um = point.y_um - i64::from(transform.height_um) / 2;
+        }
+        let layer = ContentLayer::new_image(request.original_filename, asset_id, transform);
+        let layer_id = layer.id;
+        let mut treatment = ImageTreatment::new(asset_id, request.recipe);
+        treatment.production_mode = request.production_mode;
+        let treatment_id = treatment.id;
+        let mut mapping = ProductionMapping::new(
+            layer_id,
+            ProductionTarget::new(request.side, request.layer),
+            CombineMode::Add,
+        );
+        mapping.treatment_id = Some(treatment_id);
+        let index = face_layers(&self.bundle.document, request.side).len();
+
+        self.history
+            .execute(
+                &mut self.bundle.document,
+                DocumentCommand::InsertProcessedImage {
+                    asset: new_asset,
+                    side: request.side,
+                    layer,
+                    index,
+                    treatment,
+                    mapping,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        self.bundle.assets = staged_bundle.assets;
+
+        Ok(ConfirmedImageImportView {
+            document: self.document_view(),
+            asset_id,
+            treatment_id,
+            layer_id,
+        })
+    }
+
+    fn set_treatment_recipe(
+        &mut self,
+        request: SetTreatmentRecipeRequest,
+    ) -> Result<WorkspaceDocumentView, String> {
+        self.execute(DocumentCommand::SetTreatmentRecipe {
+            treatment_id: request.treatment_id,
+            recipe: request.recipe,
+        })
+    }
+
+    fn set_image_production_mode(
+        &mut self,
+        request: SetImageProductionModeRequest,
+    ) -> Result<WorkspaceDocumentView, String> {
+        let asset_id = self
+            .bundle
+            .document
+            .image_treatments
+            .iter()
+            .find(|treatment| treatment.id == request.treatment_id)
+            .ok_or_else(|| format!("image treatment not found: {}", request.treatment_id))?
+            .asset_id;
+        validate_color_original_asset(&self.bundle, asset_id, request.production_mode)?;
+        self.execute(DocumentCommand::SetImageProductionMode {
+            treatment_id: request.treatment_id,
+            production_mode: request.production_mode,
+        })
+    }
+
+    fn set_manufacturer_profile(
+        &mut self,
+        request: SetManufacturerRequest,
+    ) -> Result<WorkspaceDocumentView, String> {
+        self.execute(DocumentCommand::SetManufacturerProfile {
+            profile: request.profile,
         })
     }
 
@@ -847,9 +1388,13 @@ impl WorkspaceSession {
             .map_err(|error| format!("{failure_prefix}：生产编译失败：{error}"))?;
         let mut rasterizer = ProjectBundleRasterizer::new(&self.bundle)
             .map_err(|error| format!("{failure_prefix}：生产栅格器初始化失败：{error}"))?;
-        let resolved = resolve_fabrication_plan(&plan, EASYEDA_EXPORT_PITCH_UM, &mut rasterizer)
-            .map_err(|error| format!("{failure_prefix}：生产几何解析失败：{error}"))?;
-        export_easyeda_handoff(output_directory, &self.bundle.document.title, &resolved)
+        let resolved = resolve_fabrication_plan_for_purpose(
+            &plan,
+            SamplingPurpose::FormalProduction,
+            &mut rasterizer,
+        )
+        .map_err(|error| format!("{failure_prefix}：生产几何解析失败：{error}"))?;
+        export_easyeda_handoff(output_directory, &self.bundle, &resolved)
             .map_err(|error| format!("{failure_prefix}：产物写入或校验失败：{error}"))
     }
 
@@ -908,6 +1453,159 @@ impl WorkspaceSession {
         self.execute(DocumentCommand::SetLayerExportEnabled {
             layer_id,
             export_enabled,
+        })
+    }
+
+    fn duplicate_layer(&mut self, request: LayerIdRequest) -> Result<LayerMutationView, String> {
+        let duplicate_layer_id = LayerId::new();
+        let duplicate_mapping_ids = self
+            .bundle
+            .document
+            .mappings
+            .iter()
+            .filter(|mapping| mapping.source_layer_id == request.layer_id)
+            .map(|_| MappingId::new())
+            .collect();
+        self.execute(DocumentCommand::DuplicateLayer {
+            layer_id: request.layer_id,
+            duplicate_layer_id,
+            duplicate_mapping_ids,
+            offset_um: 2_000,
+        })?;
+        Ok(LayerMutationView {
+            document: self.document_view(),
+            layer_id: duplicate_layer_id,
+        })
+    }
+
+    fn transfer_layers(
+        &mut self,
+        request: TransferLayersRequest,
+    ) -> Result<LayersMutationView, String> {
+        let selected = request.layer_ids.iter().copied().collect::<HashSet<_>>();
+        let roots = request
+            .layer_ids
+            .iter()
+            .copied()
+            .filter(|layer_id| {
+                let mut parent_id =
+                    find_layer(&self.bundle.document, *layer_id).and_then(|layer| layer.parent_id);
+                while let Some(parent) = parent_id {
+                    if selected.contains(&parent) {
+                        return false;
+                    }
+                    parent_id =
+                        find_layer(&self.bundle.document, parent).and_then(|layer| layer.parent_id);
+                }
+                true
+            })
+            .collect::<Vec<_>>();
+        let mut transferring = roots.iter().copied().collect::<HashSet<_>>();
+        loop {
+            let before = transferring.len();
+            for layer in self
+                .bundle
+                .document
+                .front
+                .layers
+                .iter()
+                .chain(self.bundle.document.back.layers.iter())
+            {
+                if layer
+                    .parent_id
+                    .is_some_and(|parent| transferring.contains(&parent))
+                {
+                    transferring.insert(layer.id);
+                }
+            }
+            if transferring.len() == before {
+                break;
+            }
+        }
+        let ordered_ids = self
+            .bundle
+            .document
+            .front
+            .layers
+            .iter()
+            .chain(self.bundle.document.back.layers.iter())
+            .filter(|layer| transferring.contains(&layer.id))
+            .map(|layer| layer.id)
+            .collect::<Vec<_>>();
+        let duplicate_layer_ids = if request.mode == LayerTransferMode::Copy {
+            ordered_ids
+                .iter()
+                .map(|_| LayerId::new())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let duplicate_mapping_ids = if request.mode == LayerTransferMode::Copy {
+            self.bundle
+                .document
+                .mappings
+                .iter()
+                .filter(|mapping| transferring.contains(&mapping.source_layer_id))
+                .map(|_| MappingId::new())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let id_map = ordered_ids
+            .iter()
+            .copied()
+            .zip(duplicate_layer_ids.iter().copied())
+            .collect::<HashMap<_, _>>();
+        let result_layer_ids = if request.mode == LayerTransferMode::Copy {
+            roots
+                .iter()
+                .filter_map(|root| id_map.get(root).copied())
+                .collect()
+        } else {
+            roots
+        };
+        self.execute(DocumentCommand::TransferLayers {
+            layer_ids: request.layer_ids,
+            target: ProductionTarget::new(request.target_side, request.target_layer),
+            new_parent_id: request.new_parent_id,
+            new_index: request.new_index,
+            mode: request.mode,
+            duplicate_layer_ids,
+            duplicate_mapping_ids,
+            offset_um: request.offset_um,
+        })?;
+        Ok(LayersMutationView {
+            document: self.document_view(),
+            layer_ids: result_layer_ids,
+        })
+    }
+
+    fn paste_layers(&mut self, request: PasteLayersRequest) -> Result<LayersMutationView, String> {
+        let pasted_ids = request
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .collect::<HashSet<_>>();
+        let root_ids = request
+            .layers
+            .iter()
+            .filter(|layer| {
+                layer
+                    .parent_id
+                    .is_none_or(|parent| !pasted_ids.contains(&parent))
+            })
+            .map(|layer| layer.id)
+            .collect::<Vec<_>>();
+        self.execute(DocumentCommand::PasteLayers {
+            layers: request.layers,
+            mappings: request.mappings,
+            target: ProductionTarget::new(request.target_side, request.target_layer),
+            new_parent_id: request.new_parent_id,
+            new_index: request.new_index,
+        })?;
+        Ok(LayersMutationView {
+            document: self.document_view(),
+            layer_ids: root_ids,
         })
     }
 
@@ -1028,6 +1726,36 @@ struct SaveProjectRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ImportAssetRequest {
+    original_filename: String,
+    media_type: String,
+    pixel_width: u32,
+    pixel_height: u32,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveProjectAssetRequest {
+    asset_id: AssetId,
+    folder_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceAllAssetReferencesRequest {
+    original_asset_id: AssetId,
+    replacement_asset_id: AssetId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectAssetIdRequest {
+    asset_id: AssetId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ImageAssetRequest {
     side: CardSide,
     original_filename: String,
@@ -1036,6 +1764,85 @@ struct ImageAssetRequest {
     pixel_height: u32,
     bytes: Vec<u8>,
     replace_layer_id: Option<LayerId>,
+    placement_center_um: Option<ImagePlacementCenterRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImagePlacementCenterRequest {
+    x_um: i64,
+    y_um: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InsertTreatmentRequest {
+    asset_id: AssetId,
+    recipe: TreatmentRecipe,
+    production_mode: ImageProductionMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetTreatmentRecipeRequest {
+    treatment_id: TreatmentId,
+    recipe: TreatmentRecipe,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetImageProductionModeRequest {
+    treatment_id: TreatmentId,
+    production_mode: ImageProductionMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileTreatmentRequest {
+    treatment_id: TreatmentId,
+    physical_width_um: u32,
+    physical_height_um: u32,
+    #[serde(default)]
+    pixel_pitch_um: Option<u32>,
+    purpose: SamplingPurpose,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewImageImportRequest {
+    draft_id: TreatmentId,
+    draft_revision: u64,
+    bytes: Vec<u8>,
+    recipe: TreatmentRecipe,
+    physical_width_um: u32,
+    physical_height_um: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmImageImportRequest {
+    side: CardSide,
+    layer: FaceProductionLayer,
+    original_filename: String,
+    media_type: String,
+    pixel_width: u32,
+    pixel_height: u32,
+    bytes: Vec<u8>,
+    recipe: TreatmentRecipe,
+    production_mode: ImageProductionMode,
+    placement_center_um: Option<ImagePlacementCenterRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidateManufacturerRequest {
+    profile: ManufacturerProfileSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetManufacturerRequest {
+    profile: ManufacturerProfileSnapshot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1072,6 +1879,12 @@ struct LayerIdRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LayerIdsRequest {
+    layer_ids: Vec<LayerId>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LayerNameRequest {
     layer_id: LayerId,
     name: String,
@@ -1086,6 +1899,12 @@ struct TransformLayerRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TransformLayersRequest {
+    transforms: Vec<LayerTransform>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LayerFlagRequest {
     layer_id: LayerId,
     value: bool,
@@ -1095,6 +1914,40 @@ struct LayerFlagRequest {
 #[serde(rename_all = "camelCase")]
 struct ReorderLayerRequest {
     layer_id: LayerId,
+    new_parent_id: Option<LayerId>,
+    new_index: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveLayerRequest {
+    layer_id: LayerId,
+    new_parent_id: Option<LayerId>,
+    new_index: usize,
+    side: CardSide,
+    from_layer: FaceProductionLayer,
+    to_layer: FaceProductionLayer,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferLayersRequest {
+    layer_ids: Vec<LayerId>,
+    target_side: CardSide,
+    target_layer: FaceProductionLayer,
+    new_parent_id: Option<LayerId>,
+    new_index: usize,
+    mode: LayerTransferMode,
+    offset_um: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasteLayersRequest {
+    layers: Vec<ContentLayer>,
+    mappings: Vec<ProductionMapping>,
+    target_side: CardSide,
+    target_layer: FaceProductionLayer,
     new_parent_id: Option<LayerId>,
     new_index: usize,
 }
@@ -1150,6 +2003,69 @@ struct LayerMutationView {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LayersMutationView {
+    document: WorkspaceDocumentView,
+    layer_ids: Vec<LayerId>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetMutationView {
+    document: WorkspaceDocumentView,
+    asset_id: AssetId,
+    reused: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetReferencesMutationView {
+    document: WorkspaceDocumentView,
+    original_asset_id: AssetId,
+    replacement_asset_id: AssetId,
+    replaced_instance_count: usize,
+    replaced_treatment_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetFolderMutationView {
+    document: WorkspaceDocumentView,
+    asset_id: AssetId,
+    folder_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetDeletionMutationView {
+    document: WorkspaceDocumentView,
+    deleted_asset_id: AssetId,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssetCleanupMutationView {
+    document: WorkspaceDocumentView,
+    removed_asset_ids: Vec<AssetId>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreatmentMutationView {
+    document: WorkspaceDocumentView,
+    treatment_id: TreatmentId,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmedImageImportView {
+    document: WorkspaceDocumentView,
+    asset_id: AssetId,
+    treatment_id: TreatmentId,
+    layer_id: LayerId,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct BoardFillMutationView {
     document: WorkspaceDocumentView,
     layer_id: LayerId,
@@ -1161,6 +2077,78 @@ struct BoardFillMutationView {
 struct AssetBytesView {
     media_type: String,
     bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreatmentCompileView {
+    width_px: u32,
+    height_px: u32,
+    applied_threshold: u8,
+    mask_sha256: String,
+    preview_png_data_url: String,
+    pixel_pitch_um: u32,
+    recipe_fingerprint: String,
+    revision: u64,
+    purpose: SamplingPurpose,
+    topology: atelier_core::MaskTopology,
+    diagnostics: Vec<atelier_core::TreatmentDiagnostic>,
+}
+
+impl TreatmentCompileView {
+    fn from_compiled(compiled: &CompiledImageTreatment) -> Result<Self, String> {
+        let mut rgba = Vec::with_capacity(
+            usize::try_from(
+                u64::from(compiled.mask.width_px()) * u64::from(compiled.mask.height_px()) * 4,
+            )
+            .map_err(|_| "image treatment preview dimensions overflow".to_owned())?,
+        );
+        for y in 0..compiled.mask.height_px() {
+            for x in 0..compiled.mask.width_px() {
+                if compiled.mask.get(x, y).map_err(|error| error.to_string())? {
+                    rgba.extend_from_slice(&[255, 255, 255, 255]);
+                } else {
+                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+        Ok(Self {
+            width_px: compiled.mask.width_px(),
+            height_px: compiled.mask.height_px(),
+            applied_threshold: compiled.applied_threshold,
+            mask_sha256: compiled.mask.sha256(),
+            preview_png_data_url: rgba_png_data_url(
+                compiled.mask.width_px(),
+                compiled.mask.height_px(),
+                rgba,
+            )?,
+            pixel_pitch_um: compiled.pixel_pitch_um,
+            recipe_fingerprint: compiled.recipe_fingerprint.clone(),
+            revision: compiled.revision,
+            purpose: compiled.purpose,
+            topology: compiled.topology,
+            diagnostics: compiled.diagnostics.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManufacturerValidationView {
+    profile: ManufacturerProfileSnapshot,
+    valid: bool,
+    errors: Vec<String>,
+}
+
+impl ManufacturerValidationView {
+    fn from_profile(profile: ManufacturerProfileSnapshot) -> Self {
+        let errors = profile.validate().err().unwrap_or_default();
+        Self {
+            profile,
+            valid: errors.is_empty(),
+            errors,
+        }
+    }
 }
 
 #[tauri::command]
@@ -1209,6 +2197,49 @@ fn reveal_exported_project(path: PathBuf) -> Result<(), String> {
         .canonicalize()
         .map_err(|error| format!("导出文件不存在或无法访问：{error}"))?;
     reveal_with_system(&path)
+}
+
+#[tauri::command]
+fn read_image_file(path: PathBuf) -> Result<NativeImageFileView, String> {
+    read_supported_image_file(&path)
+}
+
+fn read_supported_image_file(path: &Path) -> Result<NativeImageFileView, String> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let bytes = std::fs::read(path).map_err(|error| format!("无法读取图片文件：{error}"))?;
+    let media_type = match (extension.as_deref(), supported_image_media_type(&bytes)) {
+        (Some("png"), Some("image/png")) => "image/png",
+        (Some("jpg" | "jpeg"), Some("image/jpeg")) => "image/jpeg",
+        (Some("webp"), Some("image/webp")) => "image/webp",
+        _ => return Err("仅支持有效的 PNG、JPEG 或 WebP 图片".to_owned()),
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "图片文件名无效".to_owned())?
+        .to_owned();
+    Ok(NativeImageFileView {
+        name,
+        media_type: media_type.to_owned(),
+        bytes,
+    })
+}
+
+fn supported_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 fn validated_easyeda_project_path(path: &Path) -> Result<PathBuf, String> {
@@ -1275,7 +2306,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             workspace_invoke,
             open_easyeda_project,
-            reveal_exported_project
+            reveal_exported_project,
+            read_image_file
         ])
         .run(tauri::generate_context!())
         .expect("failed to run PCB Atelier desktop application");
@@ -1295,6 +2327,36 @@ fn find_layer(document: &AtelierDocument, layer_id: LayerId) -> Option<&ContentL
         .iter()
         .chain(document.back.layers.iter())
         .find(|layer| layer.id == layer_id)
+}
+
+fn validate_color_original_asset(
+    bundle: &ProjectBundle,
+    asset_id: AssetId,
+    production_mode: ImageProductionMode,
+) -> Result<(), String> {
+    if production_mode != ImageProductionMode::ColorOriginal {
+        return Ok(());
+    }
+    let asset = bundle
+        .document
+        .assets
+        .iter()
+        .find(|asset| asset.id == asset_id)
+        .ok_or_else(|| format!("彩色丝印素材不存在：{asset_id}"))?;
+    let bytes = bundle
+        .asset_bytes(asset_id)
+        .ok_or_else(|| format!("彩色丝印素材缺少嵌入原图字节：{asset_id}"))?;
+    let supported = matches!(
+        (asset.media_type.as_str(), image::guess_format(bytes)),
+        ("image/png", Ok(image::ImageFormat::Png)) | ("image/jpeg", Ok(image::ImageFormat::Jpeg))
+    );
+    if supported {
+        Ok(())
+    } else {
+        Err(format!(
+            "彩色原图生产仅支持声明类型与实际字节一致的 PNG/JPEG 素材；请重新导入素材 {asset_id} 或改用标准单色丝印"
+        ))
+    }
 }
 
 fn fit_image_transform(
@@ -1347,6 +2409,28 @@ mod tests {
     }
 
     #[test]
+    fn color_original_bridge_validation_checks_real_asset_bytes() {
+        let mut bundle = ProjectBundle::new(atelier_core::AtelierDocument::new_card(
+            "彩色素材",
+            10_000,
+            10_000,
+        ));
+        let asset_id = bundle
+            .embed_asset("disguised.png", "image/png", 10, 10, b"<svg/>".to_vec())
+            .expect("embed non-empty fixture");
+
+        let error = super::validate_color_original_asset(
+            &bundle,
+            asset_id,
+            atelier_core::ImageProductionMode::ColorOriginal,
+        )
+        .expect_err("declared PNG with SVG bytes must be rejected");
+
+        assert!(error.contains("实际字节"));
+        assert!(error.contains("PNG/JPEG"));
+    }
+
+    #[test]
     fn workspace_projection_reads_dimensions_from_the_domain_document() {
         let document = atelier_core::AtelierDocument::new_card("投影验证", 72_345, 48_210);
 
@@ -1382,6 +2466,7 @@ mod tests {
                 pixel_height: 1_000,
                 bytes: vec![1, 2, 3],
                 replace_layer_id: None,
+                placement_center_um: None,
             })
             .expect("image insertion should succeed");
         let layer = session
@@ -1414,6 +2499,7 @@ mod tests {
                 pixel_height: 400,
                 bytes: vec![1],
                 replace_layer_id: None,
+                placement_center_um: None,
             })
             .expect("initial insert should succeed");
         let original = session.bundle.document.front.layers[0].clone();
@@ -1436,6 +2522,7 @@ mod tests {
                 pixel_height: 200,
                 bytes: vec![2],
                 replace_layer_id: Some(inserted.layer_id),
+                placement_center_um: None,
             })
             .expect("replacement should succeed");
         let replaced = &session.bundle.document.front.layers[0];
@@ -1879,8 +2966,11 @@ mod tests {
 
         let mut document = atelier_core::AtelierDocument::new_card("Mask preview", 2_000, 2_000);
         document.stackup.solder_mask_color = SolderMaskColor::Black;
+        document.manufacturer_profile.solder_mask = SolderMaskColor::Black;
         let mut white_stackup = document.stackup.clone();
         white_stackup.solder_mask_color = SolderMaskColor::White;
+        let mut white_profile = document.manufacturer_profile.clone();
+        white_profile.solder_mask = SolderMaskColor::White;
         let mut service = super::WorkspaceService::new(document);
         let preview_request = || super::WorkspaceBridgeRequest {
             contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
@@ -1901,6 +2991,12 @@ mod tests {
             contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
             command: "set_stackup".to_owned(),
             args: serde_json::json!({ "request": { "stackup": white_stackup } }),
+        });
+        assert!(changed.error.is_none());
+        let changed = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "set_manufacturer_profile".to_owned(),
+            args: serde_json::json!({ "request": { "profile": white_profile } }),
         });
         assert!(changed.error.is_none());
 
@@ -2094,6 +3190,42 @@ mod tests {
                 .len(),
             64
         );
+    }
+
+    #[test]
+    fn image_bridge_places_a_new_instance_at_the_requested_board_point() {
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "Drop point",
+            64_000,
+            100_000,
+        ));
+        let response = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "insert_image_asset".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "side": "back",
+                    "originalFilename": "drop.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 4,
+                    "pixelHeight": 2,
+                    "bytes": [1, 2, 3],
+                    "replaceLayerId": null,
+                    "placementCenterUm": {
+                        "xUm": 17_250,
+                        "yUm": 63_750
+                    }
+                }
+            }),
+        });
+
+        assert_eq!(response.error, None);
+        let transform = &response.payload["document"]["backLayers"][0]["transform"];
+        let center_x =
+            transform["xUm"].as_i64().unwrap() + transform["widthUm"].as_i64().unwrap() / 2;
+        let center_y =
+            transform["yUm"].as_i64().unwrap() + transform["heightUm"].as_i64().unwrap() / 2;
+        assert_eq!((center_x, center_y), (17_250, 63_750));
     }
 
     #[test]
@@ -2353,6 +3485,552 @@ mod tests {
         assert_eq!(response.error, None);
         assert_eq!(response.payload["frontLayers"][0]["name"], "新名称");
         assert_eq!(response.revision, 1);
+    }
+
+    #[test]
+    fn shared_bridge_imports_compiles_validates_and_traces_domain_data() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode PNG");
+        let bytes = png.into_inner();
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "统一契约",
+            10_000,
+            10_000,
+        ));
+        let invoke =
+            |service: &mut super::WorkspaceService, command: &str, args: serde_json::Value| {
+                service.invoke(super::WorkspaceBridgeRequest {
+                    contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+                    command: command.to_owned(),
+                    args,
+                })
+            };
+
+        let imported = invoke(
+            &mut service,
+            "import_project_asset",
+            serde_json::json!({
+                "request": {
+                    "originalFilename": "source.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 2,
+                    "pixelHeight": 2,
+                    "bytes": bytes.clone()
+                }
+            }),
+        );
+        assert_eq!(imported.error, None);
+        assert_eq!(imported.revision, 1);
+        assert_eq!(imported.payload["reused"], false);
+        let asset_id = imported.payload["assetId"].clone();
+
+        let inserted_treatment = invoke(
+            &mut service,
+            "insert_image_treatment",
+            serde_json::json!({
+                "request": {
+                    "assetId": asset_id,
+                    "productionMode": "monochromeMask",
+                    "recipe": atelier_core::TreatmentRecipe::default()
+                }
+            }),
+        );
+        assert_eq!(inserted_treatment.error, None);
+        assert_eq!(inserted_treatment.revision, 2);
+        let treatment_id = inserted_treatment.payload["treatmentId"].clone();
+
+        let compiled = invoke(
+            &mut service,
+            "compile_image_treatment",
+            serde_json::json!({
+                "request": {
+                    "treatmentId": treatment_id,
+                    "physicalWidthUm": 4_000,
+                    "physicalHeightUm": 4_000,
+                    "purpose": "interactiveProxy"
+                }
+            }),
+        );
+        assert_eq!(compiled.error, None);
+        assert_eq!(compiled.revision, 2);
+        assert_eq!(compiled.payload["revision"], 2);
+        assert_eq!(
+            compiled.payload["recipeFingerprint"].as_str().map(str::len),
+            Some(64)
+        );
+        assert_eq!(
+            compiled.payload["maskSha256"].as_str().map(str::len),
+            Some(64)
+        );
+        assert!(
+            compiled.payload["previewPngDataUrl"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,"))
+        );
+
+        let unsupported = atelier_core::ManufacturerProfileSnapshot {
+            surface_finish: atelier_core::SurfaceFinish::Osp,
+            ..Default::default()
+        };
+        let validation = invoke(
+            &mut service,
+            "validate_manufacturer_profile",
+            serde_json::json!({ "request": { "profile": unsupported } }),
+        );
+        assert_eq!(validation.error, None);
+        assert_eq!(validation.revision, 2);
+        assert_eq!(validation.payload["valid"], false);
+        assert!(
+            validation.payload["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors.is_empty())
+        );
+
+        let placed = invoke(
+            &mut service,
+            "insert_image_asset",
+            serde_json::json!({
+                "request": {
+                    "side": "front",
+                    "originalFilename": "source.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 2,
+                    "pixelHeight": 2,
+                    "bytes": bytes,
+                    "replaceLayerId": null
+                }
+            }),
+        );
+        assert_eq!(placed.error, None);
+        let mapped = invoke(
+            &mut service,
+            "map_layer",
+            serde_json::json!({
+                "request": {
+                    "layerId": placed.payload["layerId"],
+                    "side": "front",
+                    "layer": "silkscreen",
+                    "combine": "add"
+                }
+            }),
+        );
+        assert_eq!(mapped.error, None);
+        let trace = invoke(&mut service, "get_production_trace", serde_json::json!({}));
+        assert_eq!(trace.error, None);
+        assert_eq!(trace.payload["format"], "atelier-production-trace-v1");
+        assert_eq!(
+            trace.payload["operations"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(trace.payload["operations"][0]["assetId"], asset_id);
+        assert_eq!(
+            trace.payload["operations"][0]["recipeFingerprint"]
+                .as_str()
+                .map(str::len),
+            Some(64)
+        );
+    }
+
+    #[test]
+    fn image_import_preview_is_read_only_and_confirmation_inserts_all_entities_once() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode PNG");
+        let bytes = png.into_inner();
+        let recipe = atelier_core::TreatmentRecipe::default();
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "Atomic import",
+            20_000,
+            20_000,
+        ));
+        let before = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_workspace_document".to_owned(),
+            args: serde_json::json!({}),
+        });
+
+        let preview = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "preview_image_import".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "draftId": atelier_core::TreatmentId::new(),
+                    "draftRevision": 1,
+                    "bytes": bytes.clone(),
+                    "recipe": recipe.clone(),
+                    "physicalWidthUm": 10_000,
+                    "physicalHeightUm": 10_000
+                }
+            }),
+        });
+        assert_eq!(preview.error, None);
+        assert_eq!(preview.revision, 0);
+        assert_eq!(preview.payload["purpose"], "interactiveProxy");
+        assert_eq!(
+            preview.payload["recipeFingerprint"],
+            "5abe3f2d53ee2523d2b34586760ca4e97cdccc2f1ec267534ecea05972c318cf"
+        );
+        let after_preview = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_workspace_document".to_owned(),
+            args: serde_json::json!({}),
+        });
+        assert_eq!(after_preview.payload, before.payload);
+
+        let confirmed = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "confirm_image_import".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "side": "front",
+                    "layer": "silkscreen",
+                    "originalFilename": "portrait.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 2,
+                    "pixelHeight": 2,
+                    "bytes": bytes,
+                    "recipe": recipe,
+                    "productionMode": "monochromeMask",
+                    "placementCenterUm": { "xUm": 10_000, "yUm": 10_000 }
+                }
+            }),
+        });
+        assert_eq!(confirmed.error, None);
+        assert_eq!(confirmed.revision, 1);
+        assert_eq!(
+            confirmed.payload["document"]["assets"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            confirmed.payload["document"]["imageTreatments"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            confirmed.payload["document"]["frontLayers"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            confirmed.payload["document"]["mappings"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            confirmed.payload["document"]["mappings"][0]["treatmentId"],
+            confirmed.payload["treatmentId"]
+        );
+
+        let undone = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "undo_workspace".to_owned(),
+            args: serde_json::json!({}),
+        });
+        assert_eq!(undone.error, None);
+        for field in ["assets", "imageTreatments", "frontLayers", "mappings"] {
+            assert_eq!(undone.payload[field].as_array().map(Vec::len), Some(0));
+        }
+    }
+
+    #[test]
+    fn failed_image_import_confirmation_leaves_no_partial_entities() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode PNG");
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "Atomic rejection",
+            20_000,
+            20_000,
+        ));
+        let rejected = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "confirm_image_import".to_owned(),
+            args: serde_json::json!({
+                "request": {
+                    "side": "front",
+                    "layer": "silkscreen",
+                    "originalFilename": "portrait.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 2,
+                    "pixelHeight": 2,
+                    "bytes": png.into_inner(),
+                    "recipe": atelier_core::TreatmentRecipe::default(),
+                    "placementCenterUm": { "xUm": 30_000, "yUm": 10_000 }
+                }
+            }),
+        });
+        assert!(rejected.error.is_some());
+        assert_eq!(rejected.revision, 0);
+
+        let document = service.invoke(super::WorkspaceBridgeRequest {
+            contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+            command: "get_workspace_document".to_owned(),
+            args: serde_json::json!({}),
+        });
+        for field in ["assets", "imageTreatments", "frontLayers", "mappings"] {
+            assert_eq!(document.payload[field].as_array().map(Vec::len), Some(0));
+        }
+    }
+
+    #[test]
+    fn shared_bridge_moves_project_assets_between_folder_paths_atomically() {
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "素材文件夹",
+            10_000,
+            10_000,
+        ));
+        let invoke =
+            |service: &mut super::WorkspaceService, command: &str, args: serde_json::Value| {
+                service.invoke(super::WorkspaceBridgeRequest {
+                    contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+                    command: command.to_owned(),
+                    args,
+                })
+            };
+        let imported = invoke(
+            &mut service,
+            "import_project_asset",
+            serde_json::json!({
+                "request": {
+                    "originalFilename": "logo.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 2,
+                    "pixelHeight": 2,
+                    "bytes": b"folder-logo"
+                }
+            }),
+        );
+        let asset_id = imported.payload["assetId"].clone();
+        let sha256 = imported.payload["document"]["assets"][0]["sha256"].clone();
+
+        let moved = invoke(
+            &mut service,
+            "move_project_asset",
+            serde_json::json!({
+                "request": {
+                    "assetId": asset_id,
+                    "folderPath": " 品牌 / 标志 "
+                }
+            }),
+        );
+        assert_eq!(moved.error, None);
+        assert_eq!(moved.revision, 2);
+        assert_eq!(moved.payload["assetId"], asset_id);
+        assert_eq!(moved.payload["folderPath"], "品牌/标志");
+        assert_eq!(
+            moved.payload["document"]["assets"][0]["folderPath"],
+            "品牌/标志"
+        );
+        assert_eq!(moved.payload["document"]["assets"][0]["sha256"], sha256);
+
+        let repeated = invoke(
+            &mut service,
+            "move_project_asset",
+            serde_json::json!({
+                "request": {
+                    "assetId": asset_id,
+                    "folderPath": "品牌/标志"
+                }
+            }),
+        );
+        assert_eq!(repeated.error, None);
+        assert_eq!(repeated.revision, 2);
+
+        let rejected = invoke(
+            &mut service,
+            "move_project_asset",
+            serde_json::json!({
+                "request": {
+                    "assetId": asset_id,
+                    "folderPath": "../外部"
+                }
+            }),
+        );
+        assert!(
+            rejected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("folder path"))
+        );
+        assert_eq!(rejected.revision, 2);
+        assert_eq!(
+            service.session.document_view().assets[0]
+                .folder_path
+                .as_deref(),
+            Some("品牌/标志")
+        );
+    }
+
+    #[test]
+    fn shared_bridge_replaces_protects_and_cleans_project_assets() {
+        let mut service = super::WorkspaceService::new(atelier_core::AtelierDocument::new_card(
+            "素材领域操作",
+            10_000,
+            10_000,
+        ));
+        let invoke =
+            |service: &mut super::WorkspaceService, command: &str, args: serde_json::Value| {
+                service.invoke(super::WorkspaceBridgeRequest {
+                    contract_version: super::WORKSPACE_CONTRACT_VERSION.to_owned(),
+                    command: command.to_owned(),
+                    args,
+                })
+            };
+        let import = |service: &mut super::WorkspaceService, name: &str, bytes: &[u8]| {
+            invoke(
+                service,
+                "import_project_asset",
+                serde_json::json!({
+                    "request": {
+                        "originalFilename": name,
+                        "mediaType": "image/png",
+                        "pixelWidth": 2,
+                        "pixelHeight": 2,
+                        "bytes": bytes
+                    }
+                }),
+            )
+        };
+
+        let original = import(&mut service, "original.png", b"original");
+        let replacement = import(&mut service, "replacement.png", b"replacement");
+        let unused = import(&mut service, "unused.png", b"unused");
+        let original_id = original.payload["assetId"].clone();
+        let replacement_id = replacement.payload["assetId"].clone();
+        let unused_id = unused.payload["assetId"].clone();
+
+        let placed = invoke(
+            &mut service,
+            "insert_image_asset",
+            serde_json::json!({
+                "request": {
+                    "side": "front",
+                    "originalFilename": "original.png",
+                    "mediaType": "image/png",
+                    "pixelWidth": 2,
+                    "pixelHeight": 2,
+                    "bytes": b"original",
+                    "replaceLayerId": null
+                }
+            }),
+        );
+        let mapped = invoke(
+            &mut service,
+            "map_layer",
+            serde_json::json!({
+                "request": {
+                    "layerId": placed.payload["layerId"],
+                    "side": "front",
+                    "layer": "silkscreen",
+                    "combine": "add"
+                }
+            }),
+        );
+        assert_eq!(mapped.error, None);
+        let treatment_id = mapped.payload["imageTreatments"][0]["id"].clone();
+        let mapping_id = mapped.payload["mappings"][0]["id"].clone();
+
+        let replaced = invoke(
+            &mut service,
+            "replace_all_asset_references",
+            serde_json::json!({
+                "request": {
+                    "originalAssetId": original_id,
+                    "replacementAssetId": replacement_id
+                }
+            }),
+        );
+        assert_eq!(replaced.error, None);
+        assert_eq!(replaced.revision, 6);
+        assert_eq!(replaced.payload["replacedInstanceCount"], 1);
+        assert_eq!(replaced.payload["replacedTreatmentCount"], 1);
+        assert_eq!(
+            replaced.payload["document"]["frontLayers"][0]["kind"]["assetId"],
+            replacement_id
+        );
+        assert_eq!(
+            replaced.payload["document"]["imageTreatments"][0]["assetId"],
+            replacement_id
+        );
+        assert_eq!(
+            replaced.payload["document"]["imageTreatments"][0]["id"],
+            treatment_id
+        );
+        assert_eq!(
+            replaced.payload["document"]["mappings"][0]["id"],
+            mapping_id
+        );
+
+        let deleted_original = invoke(
+            &mut service,
+            "delete_project_asset",
+            serde_json::json!({ "request": { "assetId": original_id } }),
+        );
+        assert_eq!(deleted_original.error, None);
+        assert_eq!(deleted_original.revision, 7);
+        assert_eq!(deleted_original.payload["deletedAssetId"], original_id);
+
+        let protected = invoke(
+            &mut service,
+            "delete_project_asset",
+            serde_json::json!({ "request": { "assetId": replacement_id } }),
+        );
+        assert!(
+            protected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("still used"))
+        );
+        assert_eq!(protected.revision, 7);
+
+        let cleaned = invoke(&mut service, "cleanup_unused_assets", serde_json::json!({}));
+        assert_eq!(cleaned.error, None);
+        assert_eq!(cleaned.revision, 8);
+        assert_eq!(
+            cleaned.payload["removedAssetIds"],
+            serde_json::json!([unused_id])
+        );
+        assert_eq!(
+            cleaned.payload["document"]["assets"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let repeated_cleanup = invoke(&mut service, "cleanup_unused_assets", serde_json::json!({}));
+        assert_eq!(repeated_cleanup.error, None);
+        assert_eq!(repeated_cleanup.revision, 8);
+        assert_eq!(
+            repeated_cleanup.payload["removedAssetIds"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn native_image_reader_accepts_supported_signatures_and_rejects_other_files() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let png = temp.path().join("art.png");
+        std::fs::write(&png, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).expect("write png");
+
+        let selected = super::read_supported_image_file(&png).expect("read png");
+        assert_eq!(selected.name, "art.png");
+        assert_eq!(selected.media_type, "image/png");
+
+        let json = temp.path().join("not-an-image.json");
+        std::fs::write(&json, br#"{"image":false}"#).expect("write json");
+        assert_eq!(
+            super::read_supported_image_file(&json),
+            Err("仅支持有效的 PNG、JPEG 或 WebP 图片".to_owned())
+        );
     }
 
     fn asymmetric_export_session() -> super::WorkspaceSession {

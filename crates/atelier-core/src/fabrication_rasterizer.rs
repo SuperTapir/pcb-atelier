@@ -16,7 +16,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     BitMask, BoardOutline, CropRect, FabricationOperation, FabricationPrimitive,
-    FabricationRasterizer, ProjectBundle, RasterGrid, TextContent, TransformUm,
+    FabricationRasterizer, ProjectBundle, RasterGrid, SamplingPurpose, TextContent, TransformUm,
+    TreatmentCompileRequest, TreatmentRecipe, compile_image_treatment,
 };
 
 pub const ALPHA_THRESHOLD: u8 = 128;
@@ -98,6 +99,7 @@ impl<'a> ProjectBundleRasterizer<'a> {
         &self,
         asset_id: crate::AssetId,
         crop: Option<&CropRect>,
+        treatment: Option<&TreatmentRecipe>,
         transform: TransformUm,
         grid: &RasterGrid,
     ) -> Result<BitMask, String> {
@@ -105,8 +107,33 @@ impl<'a> ProjectBundleRasterizer<'a> {
             .bundle
             .asset_bytes(asset_id)
             .ok_or_else(|| format!("missing image asset {asset_id}"))?;
-        let image = image::load_from_memory(bytes)
-            .map_err(|error| format!("decode image asset {asset_id}: {error}"))?;
+        let treated = treatment
+            .map(|recipe| {
+                let mut effective_recipe = recipe.clone();
+                if effective_recipe.crop.is_none() {
+                    effective_recipe.crop = crop.cloned();
+                }
+                compile_image_treatment(
+                    bytes,
+                    &effective_recipe,
+                    TreatmentCompileRequest {
+                        physical_width_um: transform.width_um,
+                        physical_height_um: transform.height_um,
+                        pixel_pitch_um: grid.pixel_pitch_um,
+                        revision: 0,
+                        purpose: SamplingPurpose::FormalProduction,
+                    },
+                )
+                .map_err(|error| format!("treat image asset {asset_id}: {error}"))
+            })
+            .transpose()?;
+        let image = treatment
+            .is_none()
+            .then(|| {
+                image::load_from_memory(bytes)
+                    .map_err(|error| format!("decode image asset {asset_id}: {error}"))
+            })
+            .transpose()?;
         let mut mask =
             BitMask::new(grid.width_px, grid.height_px).map_err(|error| error.to_string())?;
         for y in 0..grid.height_px {
@@ -117,8 +144,25 @@ impl<'a> ProjectBundleRasterizer<'a> {
                 let Some((u, v)) = inverse_transform(grid, x, y, transform) else {
                     continue;
                 };
-                let (source_x, source_y) = crop_sample(&image, crop, u, v);
-                if is_production_ink(image.get_pixel(source_x, source_y).0) {
+                let is_ink = if let Some(treated) = &treated {
+                    let source_x = (u * f64::from(treated.mask.width_px()))
+                        .floor()
+                        .clamp(0.0, f64::from(treated.mask.width_px().saturating_sub(1)))
+                        as u32;
+                    let source_y = (v * f64::from(treated.mask.height_px()))
+                        .floor()
+                        .clamp(0.0, f64::from(treated.mask.height_px().saturating_sub(1)))
+                        as u32;
+                    treated
+                        .mask
+                        .get(source_x, source_y)
+                        .map_err(|error| error.to_string())?
+                } else {
+                    let image = image.as_ref().expect("legacy image was decoded");
+                    let (source_x, source_y) = crop_sample(image, crop, u, v);
+                    is_production_ink(image.get_pixel(source_x, source_y).0)
+                };
+                if is_ink {
                     mask.set(x, y, true).map_err(|error| error.to_string())?;
                 }
             }
@@ -215,9 +259,17 @@ impl FabricationRasterizer for ProjectBundleRasterizer<'_> {
         grid: &RasterGrid,
     ) -> Result<BitMask, String> {
         match &operation.primitive {
-            FabricationPrimitive::Image { asset_id, crop } => {
-                self.rasterize_image(*asset_id, crop.as_ref(), operation.transform, grid)
-            }
+            FabricationPrimitive::Image {
+                asset_id,
+                crop,
+                treatment,
+            } => self.rasterize_image(
+                *asset_id,
+                crop.as_ref(),
+                treatment.as_ref(),
+                operation.transform,
+                grid,
+            ),
             FabricationPrimitive::Text(text) => {
                 self.rasterize_text(text, operation.transform, grid)
             }

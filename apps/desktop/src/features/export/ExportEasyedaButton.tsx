@@ -1,7 +1,14 @@
-import { Download, ExternalLink, FolderOpen, LoaderCircle } from "lucide-react";
+import {
+  AlertTriangle,
+  Download,
+  ExternalLink,
+  FolderOpen,
+  LoaderCircle,
+} from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { formatEasyedaExportStatus } from "@/features/export/export-status";
 import {
   exportEasyeda,
   openEasyedaProject,
@@ -42,9 +49,7 @@ export function ExportEasyedaButton({
               const report = await exportEasyeda(outputDirectory);
               setLastExport(report);
               onExported?.(report);
-              onStatus(
-                `已导出 ${report.exportVersion} · ${report.primitives.fillCount} 个图形 · ${report.nativeProjectPath}`,
-              );
+              onStatus(formatEasyedaExportStatus(report));
             } catch (error) {
               onStatus(`导出失败：${errorMessage(error)}`);
             } finally {
@@ -62,6 +67,19 @@ export function ExportEasyedaButton({
       </Button>
       {lastExport && (
         <>
+          {!lastExport.orderSupport.directOrderSupported && (
+            <span
+              className="flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400"
+              role="status"
+              title={[
+                ...lastExport.orderSupport.issues,
+                ...lastExport.orderSupport.downgradeActions,
+              ].join("；")}
+            >
+              <AlertTriangle className="size-3.5" />
+              需调整制造资料
+            </span>
+          )}
           <Button
             aria-label="使用嘉立创 EDA 打开导出工程"
             onClick={() =>

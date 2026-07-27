@@ -9,6 +9,7 @@ import {
   nudgeTransform,
   parseDegreesToMdeg,
   parseMillimetresToUm,
+  resizeWithLockedAspectRatio,
   snapTransform,
   type GeometryLayer,
 } from "@/features/workspace/geometry-edit";
@@ -74,6 +75,15 @@ describe("parseDegreesToMdeg", () => {
 });
 
 describe("applyTransformPatch and nudgeTransform", () => {
+  it("keeps the current aspect ratio when width or height changes", () => {
+    expect(
+      resizeWithLockedAspectRatio(80_000, 40_000, "width", 120_000),
+    ).toEqual({ widthUm: 120_000, heightUm: 60_000 });
+    expect(
+      resizeWithLockedAspectRatio(80_000, 40_000, "height", 25_000),
+    ).toEqual({ widthUm: 50_000, heightUm: 25_000 });
+  });
+
   it("applies integer transform fields exactly without changing untouched fields", () => {
     const selected = layer("selected");
 

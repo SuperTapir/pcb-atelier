@@ -28,7 +28,9 @@ export interface WorkspaceDocument {
   frontLayers: ContentLayer[];
   backLayers: ContentLayer[];
   assets: AssetReference[];
+  imageTreatments: ImageTreatment[];
   mappings: ProductionMapping[];
+  manufacturerProfile: ManufacturerProfileSnapshot;
   history: {
     canUndo: boolean;
     canRedo: boolean;
@@ -44,7 +46,7 @@ export type SolderMaskColor =
   | "purple"
   | "yellow";
 
-export type SurfaceFinish = "enig" | "haslLeadFree";
+export type SurfaceFinish = "enig" | "haslLead" | "haslLeadFree" | "osp";
 
 export interface StackupPreset {
   substrate: "fr4";
@@ -63,6 +65,7 @@ export interface ProductionMapping {
     layer: ProductionLayer;
   };
   combine: "add" | "subtract";
+  treatmentId?: string | null;
 }
 
 export interface TransformUm {
@@ -104,11 +107,58 @@ export interface AssetReference {
   sha256: string;
   pixelWidth: number;
   pixelHeight: number;
+  folderPath: string | null;
+  tags: string[];
+  hasAlpha: boolean;
+}
+
+export interface ImageTreatment {
+  id: string;
+  assetId: string;
+  productionMode: ImageProductionMode;
+  recipe: TreatmentRecipe;
+}
+
+export type ImageProductionMode = "monochromeMask" | "colorOriginal";
+
+export interface TreatmentRecipe {
+  algorithmVersion: string;
+  alphaMode: "compositeOnWhite" | "alphaAsCoverage" | "ignoreAlpha";
+  threshold:
+    | { mode: "otsu" }
+    | { mode: "manual"; value: number };
+  invert: boolean;
+  smoothingRadiusUm: number;
+  despeckleRadiusUm: number;
+  removeIslandsBelowUm2: number;
+  minimumLineWidthUm: number;
+  thinFeaturePolicy: "preserve" | "thicken" | "remove";
+  minimumGapUm: number;
+  crop: unknown | null;
+}
+
+export interface ManufacturerProfileSnapshot {
+  manufacturerId: string;
+  profileVersion: string;
+  sourceUpdatedAt: string;
+  sourceUrls: string[];
+  substrate: "fr4";
+  layerCount: number;
+  thicknessUm: number;
+  outerCopper: "oz0_5" | "oz1" | "oz2";
+  solderMask: SolderMaskColor;
+  characterProcess: "standardWhite" | "standardBlack" | "multicolor";
+  surfaceFinish: SurfaceFinish;
 }
 
 export interface LayerMutation {
   document: WorkspaceDocument;
   layerId: string;
+}
+
+export interface LayersMutation {
+  document: WorkspaceDocument;
+  layerIds: string[];
 }
 
 export interface BoardFillMutation extends LayerMutation {
@@ -139,6 +189,10 @@ export interface EasyedaExportReport {
   fabricationOutputSha256: string;
   publicArchiveSha256: string;
   nativeProjectSha256: string;
+  productionSource: "formalProduction";
+  imageGraphics: EasyedaImageGraphicTrace[];
+  manufacturing: EasyedaManufacturingSummary;
+  orderSupport: EasyedaOrderSupport;
   primitives: {
     fillCount: number;
     holeCount: number;
@@ -146,6 +200,41 @@ export interface EasyedaExportReport {
   };
   publicValidation: EasyedaPublicValidation;
   nativeValidation: EasyedaNativeValidation;
+}
+
+export interface EasyedaImageGraphicTrace {
+  mappingId: string;
+  sourceInstanceId: string;
+  target: {
+    side: "front" | "back";
+    layer: ProductionLayer;
+  };
+  treatmentId: string | null;
+  algorithmVersion: string | null;
+  recipeFingerprint: string | null;
+  assetId: string;
+  assetSha256: string;
+  maskSha256: string;
+}
+
+export interface EasyedaManufacturingSummary {
+  validated: boolean;
+  manufacturerId: string;
+  profileVersion: string;
+  substrate: "fr4";
+  layerCount: number;
+  thicknessUm: number;
+  outerCopper: "oz0_5" | "oz1" | "oz2";
+  solderMask: SolderMaskColor;
+  characterProcess: "standardWhite" | "standardBlack" | "multicolor";
+  surfaceFinish: SurfaceFinish;
+}
+
+export interface EasyedaOrderSupport {
+  status: "directOrderSupported" | "requiresManualAdjustment";
+  directOrderSupported: boolean;
+  issues: string[];
+  downgradeActions: string[];
 }
 
 export interface EasyedaPublicValidation {
@@ -198,6 +287,146 @@ export interface ImageAssetInput {
   pixelHeight: number;
   bytes: number[];
   replaceLayerId: string | null;
+  placementCenterUm?: {
+    xUm: number;
+    yUm: number;
+  };
+}
+
+export interface ProjectAssetInput {
+  originalFilename: string;
+  mediaType: string;
+  pixelWidth: number;
+  pixelHeight: number;
+  bytes: number[];
+}
+
+export interface AssetMutation {
+  document: WorkspaceDocument;
+  assetId: string;
+  reused: boolean;
+}
+
+export interface AssetFolderMutation {
+  document: WorkspaceDocument;
+  assetId: string;
+  folderPath: string | null;
+}
+
+export interface AssetReferencesMutation {
+  document: WorkspaceDocument;
+  originalAssetId: string;
+  replacementAssetId: string;
+  replacedInstanceCount: number;
+  replacedTreatmentCount: number;
+}
+
+export interface AssetDeletionMutation {
+  document: WorkspaceDocument;
+  deletedAssetId: string;
+}
+
+export interface AssetCleanupMutation {
+  document: WorkspaceDocument;
+  removedAssetIds: string[];
+}
+
+export interface TreatmentMutation {
+  document: WorkspaceDocument;
+  treatmentId: string;
+}
+
+export interface ImageImportDraftInput {
+  draftId: string;
+  draftRevision: number;
+  bytes: number[];
+  recipe: TreatmentRecipe;
+  physicalWidthUm: number;
+  physicalHeightUm: number;
+}
+
+export interface ConfirmImageImportInput {
+  side: "front" | "back";
+  layer: ProductionLayer;
+  originalFilename: string;
+  mediaType: string;
+  pixelWidth: number;
+  pixelHeight: number;
+  bytes: number[];
+  recipe: TreatmentRecipe;
+  productionMode: ImageProductionMode;
+  placementCenterUm?: {
+    xUm: number;
+    yUm: number;
+  };
+}
+
+export interface ConfirmedImageImport {
+  document: WorkspaceDocument;
+  assetId: string;
+  treatmentId: string;
+  layerId: string;
+}
+
+export type SamplingPurpose =
+  | "interactiveProxy"
+  | "boardPreview"
+  | "formalProduction";
+
+export interface TreatmentCompileReport {
+  widthPx: number;
+  heightPx: number;
+  appliedThreshold: number;
+  maskSha256: string;
+  previewPngDataUrl: string;
+  pixelPitchUm: number;
+  recipeFingerprint: string;
+  revision: number;
+  purpose: SamplingPurpose;
+  topology: { islandCount: number; holeCount: number };
+  diagnostics: Array<Record<string, unknown>>;
+}
+
+export interface ManufacturerValidation {
+  profile: ManufacturerProfileSnapshot;
+  valid: boolean;
+  errors: string[];
+}
+
+export interface ProductionTrace {
+  format: "atelier-production-trace-v1";
+  revision: number;
+  coordinateSpace: "boardPhysicalUpright";
+  manufacturerProfile: ManufacturerProfileSnapshot;
+  manufacturerProfileFingerprint: string;
+  fabricationInputSha256: string;
+  fabricationOutputSha256: string;
+  layers: Array<{
+    target: { side: "front" | "back"; layer: ProductionLayer };
+    polarity: "positive" | "opening";
+    compositeSha256: string;
+    boundsUm: {
+      minXUm: number;
+      minYUm: number;
+      maxXUm: number;
+      maxYUm: number;
+    } | null;
+    topology: {
+      islandCount: number;
+      holeCount: number;
+    };
+  }>;
+  operations: Array<{
+    mappingId: string;
+    sourceLayerId: string;
+    target: { side: "front" | "back"; layer: ProductionLayer };
+    maskSha256: string;
+    assetId: string | null;
+    assetSha256: string | null;
+    treatmentId: string | null;
+    algorithmVersion: string | null;
+    recipeFingerprint: string | null;
+  }>;
 }
 
 export interface InsertTextInput {
@@ -377,6 +606,124 @@ export function insertImageAsset(
   return invokeCore<LayerMutation>("insert_image_asset", { request });
 }
 
+export function importProjectAsset(
+  request: ProjectAssetInput,
+): Promise<AssetMutation> {
+  return invokeCore<AssetMutation>("import_project_asset", { request });
+}
+
+export function moveProjectAsset(
+  assetId: string,
+  folderPath: string | null,
+): Promise<AssetFolderMutation> {
+  return invokeCore<AssetFolderMutation>("move_project_asset", {
+    request: { assetId, folderPath },
+  });
+}
+
+export function replaceAllAssetReferences(
+  originalAssetId: string,
+  replacementAssetId: string,
+): Promise<AssetReferencesMutation> {
+  return invokeCore<AssetReferencesMutation>("replace_all_asset_references", {
+    request: { originalAssetId, replacementAssetId },
+  });
+}
+
+export function deleteProjectAsset(
+  assetId: string,
+): Promise<AssetDeletionMutation> {
+  return invokeCore<AssetDeletionMutation>("delete_project_asset", {
+    request: { assetId },
+  });
+}
+
+export function cleanupUnusedAssets(): Promise<AssetCleanupMutation> {
+  return invokeCore<AssetCleanupMutation>("cleanup_unused_assets");
+}
+
+export function insertImageTreatment(
+  assetId: string,
+  recipe: TreatmentRecipe,
+  productionMode: ImageProductionMode = "monochromeMask",
+): Promise<TreatmentMutation> {
+  return invokeCore<TreatmentMutation>("insert_image_treatment", {
+    request: { assetId, productionMode, recipe },
+  });
+}
+
+export function setTreatmentRecipe(
+  treatmentId: string,
+  recipe: TreatmentRecipe,
+): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("set_treatment_recipe", {
+    request: { treatmentId, recipe },
+  });
+}
+
+export function setImageProductionMode(
+  treatmentId: string,
+  productionMode: ImageProductionMode,
+): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("set_image_production_mode", {
+    request: { treatmentId, productionMode },
+  });
+}
+
+export function compileImageTreatment(
+  treatmentId: string,
+  physicalWidthUm: number,
+  physicalHeightUm: number,
+  purpose: SamplingPurpose,
+  pixelPitchUm?: number,
+): Promise<TreatmentCompileReport> {
+  return invokeCore<TreatmentCompileReport>("compile_image_treatment", {
+    request: {
+      treatmentId,
+      physicalWidthUm,
+      physicalHeightUm,
+      purpose,
+      pixelPitchUm: pixelPitchUm ?? null,
+    },
+  });
+}
+
+export function previewImageImport(
+  request: ImageImportDraftInput,
+): Promise<TreatmentCompileReport> {
+  return invokeCore<TreatmentCompileReport>("preview_image_import", {
+    request,
+  });
+}
+
+export function confirmImageImport(
+  request: ConfirmImageImportInput,
+): Promise<ConfirmedImageImport> {
+  return invokeCore<ConfirmedImageImport>("confirm_image_import", {
+    request,
+  });
+}
+
+export function validateManufacturerProfile(
+  profile: ManufacturerProfileSnapshot,
+): Promise<ManufacturerValidation> {
+  return invokeCore<ManufacturerValidation>("validate_manufacturer_profile", {
+    request: { profile },
+  });
+}
+
+export function setManufacturerProfile(
+  profile: ManufacturerProfileSnapshot,
+): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("set_manufacturer_profile", {
+    request: { profile },
+  });
+}
+
+export function getProductionTrace(): Promise<ProductionTrace> {
+  return invokeCore<ProductionTrace>("get_production_trace");
+}
+
 export function insertTextLayer(
   request: InsertTextInput,
 ): Promise<LayerMutation> {
@@ -411,6 +758,47 @@ export function setLayerName(
   });
 }
 
+export function deleteLayer(layerId: string): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("delete_layer", {
+    request: { layerId },
+  });
+}
+
+export function deleteLayers(layerIds: string[]): Promise<WorkspaceDocument> {
+  return invokeCore<WorkspaceDocument>("delete_layers", {
+    request: { layerIds },
+  });
+}
+
+export function duplicateLayer(layerId: string): Promise<LayerMutation> {
+  return invokeCore<LayerMutation>("duplicate_layer", {
+    request: { layerId },
+  });
+}
+
+export function transferLayers(request: {
+  layerIds: string[];
+  targetSide: "front" | "back";
+  targetLayer: ProductionLayer;
+  newParentId: string | null;
+  newIndex: number;
+  mode: "copy" | "move";
+  offsetUm: number;
+}): Promise<LayersMutation> {
+  return invokeCore<LayersMutation>("transfer_layers", { request });
+}
+
+export function pasteLayers(request: {
+  layers: ContentLayer[];
+  mappings: ProductionMapping[];
+  targetSide: "front" | "back";
+  targetLayer: ProductionLayer;
+  newParentId: string | null;
+  newIndex: number;
+}): Promise<LayersMutation> {
+  return invokeCore<LayersMutation>("paste_layers", { request });
+}
+
 export function getAssetBytes(
   assetId: string,
 ): Promise<{ mediaType: string; bytes: number[] }> {
@@ -422,6 +810,17 @@ export function transformLayer(
   transform: TransformUm,
 ): Promise<WorkspaceDocument> {
   return invokeCore("transform_layer", { request: { layerId, transform } });
+}
+
+export interface LayerTransformUpdate {
+  layerId: string;
+  transform: TransformUm;
+}
+
+export function transformLayers(
+  transforms: LayerTransformUpdate[],
+): Promise<WorkspaceDocument> {
+  return invokeCore("transform_layers", { request: { transforms } });
 }
 
 export function setLayerLock(
@@ -490,6 +889,26 @@ export function reorderLayer(
 ): Promise<WorkspaceDocument> {
   return invokeCore("reorder_layer", {
     request: { layerId, newParentId, newIndex },
+  });
+}
+
+export function moveLayer(
+  layerId: string,
+  newParentId: string | null,
+  newIndex: number,
+  side: "front" | "back",
+  fromLayer: ProductionLayer,
+  toLayer: ProductionLayer,
+): Promise<WorkspaceDocument> {
+  return invokeCore("move_layer", {
+    request: {
+      layerId,
+      newParentId,
+      newIndex,
+      side,
+      fromLayer,
+      toLayer,
+    },
   });
 }
 

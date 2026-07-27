@@ -41,7 +41,10 @@ export interface BoardPreviewInput {
   fabricationOutputSha256: string;
   textures: {
     palette: {
+      exposedCopper: { r: number; g: number; b: number; a: number };
       solderMask: { r: number; g: number; b: number; a: number };
+      silkscreen: { r: number; g: number; b: number; a: number };
+      substrate: { r: number; g: number; b: number; a: number };
     };
     front: BoardPreviewTexture;
     back: BoardPreviewTexture;

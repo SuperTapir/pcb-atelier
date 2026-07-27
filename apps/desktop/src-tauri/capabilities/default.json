@@ -3,5 +3,11 @@
   "identifier": "default",
   "description": "Default capability for the main PCB Atelier window",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-maximize",
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-unmaximize",
+    "dialog:allow-open"
+  ]
 }

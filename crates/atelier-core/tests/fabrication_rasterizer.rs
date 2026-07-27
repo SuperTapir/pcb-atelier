@@ -29,6 +29,7 @@ fn operation(asset_id: atelier_core::AssetId, transform: TransformUm) -> Fabrica
         primitive: FabricationPrimitive::Image {
             asset_id,
             crop: None,
+            treatment: None,
         },
         clip_to_board: true,
     }
@@ -111,6 +112,7 @@ fn image_crop_rotation_and_mirror_are_applied_before_board_clipping() {
             width_millionths: 500_000,
             height_millionths: 500_000,
         }),
+        treatment: None,
     };
     let mask = rasterizer.rasterize(&cropped, &grid).expect("rasterize");
     assert_eq!(

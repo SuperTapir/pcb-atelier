@@ -57,6 +57,7 @@ fn board(width: u32, height: u32) -> ResolvedFabricationBoard {
             output_sha256: "output".to_owned(),
             font_fingerprint: "font".to_owned(),
             pixel_pitch_um: 100,
+            sampling_purpose: None,
         },
     }
 }

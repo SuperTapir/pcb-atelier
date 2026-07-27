@@ -51,7 +51,9 @@ impl PreviewPalette {
         };
         let exposed_copper = match stackup.surface_finish {
             SurfaceFinish::Enig => Rgba8::opaque(211, 166, 57),
-            SurfaceFinish::HaslLeadFree => Rgba8::opaque(195, 199, 201),
+            SurfaceFinish::HaslLead | SurfaceFinish::HaslLeadFree | SurfaceFinish::Osp => {
+                Rgba8::opaque(195, 199, 201)
+            }
         };
         let solder_mask = match stackup.solder_mask_color {
             SolderMaskColor::Black => Rgba8::opaque(27, 29, 28),

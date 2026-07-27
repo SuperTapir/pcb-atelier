@@ -9,6 +9,8 @@
   --foreground: oklch(0.2 0.01 80);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.2 0.01 80);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.01 80);
   --primary: oklch(0.28 0.02 80);
   --primary-foreground: oklch(0.985 0.002 95);
   --muted: oklch(0.94 0.006 90);
@@ -27,6 +29,8 @@
   --foreground: oklch(0.92 0.006 90);
   --card: oklch(0.225 0.007 80);
   --card-foreground: oklch(0.94 0.005 90);
+  --popover: oklch(0.225 0.007 80);
+  --popover-foreground: oklch(0.94 0.005 90);
   --primary: oklch(0.82 0.018 86);
   --primary-foreground: oklch(0.18 0.008 80);
   --muted: oklch(0.275 0.008 80);
@@ -45,6 +49,8 @@
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-muted: var(--muted);
@@ -78,5 +84,43 @@
   textarea,
   select {
     font: inherit;
+  }
+}
+
+@layer components {
+  .treatment-editor {
+    container-type: inline-size;
+  }
+
+  .treatment-preview-grid,
+  .treatment-basic-grid,
+  .treatment-parameter-grid,
+  .treatment-crop-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .treatment-preview-viewport {
+    height: clamp(11rem, 26vh, 17rem);
+    overflow: hidden;
+  }
+
+  @container (min-width: 34rem) {
+    .treatment-preview-grid,
+    .treatment-basic-grid,
+    .treatment-parameter-grid,
+    .treatment-crop-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .treatment-preview-viewport {
+      height: clamp(11rem, 26vh, 17rem);
+    }
+  }
+
+  @container (min-width: 52rem) {
+    .treatment-basic-grid,
+    .treatment-parameter-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
   }
 }

@@ -2,7 +2,7 @@ export type WorkspaceTool = "select" | "text" | "image";
 export type CardFace = "front" | "back";
 export type WorkspaceMode = "edit" | "preview";
 export type EditLayout = "both" | "focus";
-export type BoardArrangement = "auto" | "horizontal" | "vertical";
+export type BoardArrangement = "horizontal" | "vertical";
 export type WorkContext = "copper" | "solderMaskOpen" | "silkscreen";
 
 export interface CanvasViewport {
@@ -48,11 +48,14 @@ const DEFAULT_VIEWPORT: CanvasViewport = {
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 4;
 
-export function createInitialWorkspaceState(): WorkspaceState {
+export function createInitialWorkspaceState(
+  boardArrangement: BoardArrangement = "horizontal",
+  editLayout: EditLayout = "both",
+): WorkspaceState {
   return {
     workspaceMode: "edit",
-    editLayout: "both",
-    boardArrangement: "auto",
+    editLayout,
+    boardArrangement,
     activeFace: "front",
     tool: "select",
     inspectorTarget: "face",
@@ -81,7 +84,15 @@ export function workspaceReducer(
     case "setEditLayout":
       return { ...state, editLayout: action.editLayout };
     case "setBoardArrangement":
-      return { ...state, boardArrangement: action.boardArrangement };
+      if (state.boardArrangement === action.boardArrangement) return state;
+      return {
+        ...state,
+        boardArrangement: action.boardArrangement,
+        viewports: {
+          front: { ...state.viewports.front, panX: 0, panY: 0 },
+          back: { ...state.viewports.back, panX: 0, panY: 0 },
+        },
+      };
     case "setFace":
       return { ...state, activeFace: action.face, inspectorTarget: "face" };
     case "setTool":

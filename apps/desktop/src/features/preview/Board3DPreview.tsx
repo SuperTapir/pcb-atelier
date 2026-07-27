@@ -40,10 +40,20 @@ export function Board3DPreview({
       aria-label="3D 成板效果预览"
       className={className}
       data-fabrication-output-sha={preview.fabricationOutputSha256}
+      data-exposed-copper-rgb={[
+        preview.textures.palette.exposedCopper.r,
+        preview.textures.palette.exposedCopper.g,
+        preview.textures.palette.exposedCopper.b,
+      ].join(",")}
       data-solder-mask-rgb={[
         preview.textures.palette.solderMask.r,
         preview.textures.palette.solderMask.g,
         preview.textures.palette.solderMask.b,
+      ].join(",")}
+      data-substrate-rgb={[
+        preview.textures.palette.substrate.r,
+        preview.textures.palette.substrate.g,
+        preview.textures.palette.substrate.b,
       ].join(",")}
       data-testid="board-3d-preview"
       role="img"
@@ -175,11 +185,11 @@ function BoardMesh({ preview }: { preview: BoardPreviewInput }) {
   const bodyMaterial = useMemo(
     () =>
       new MeshStandardMaterial({
-        color: "#174a3a",
+        color: rgba8ToCssHex(preview.textures.palette.substrate),
         metalness: 0.08,
         roughness: 0.58,
       }),
-    [],
+    [preview.textures.palette.substrate],
   );
   const frontMaterial = useMemo(
     () => {
@@ -249,6 +259,17 @@ function BoardMesh({ preview }: { preview: BoardPreviewInput }) {
       />
     </group>
   );
+}
+
+export function rgba8ToCssHex(color: {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}) {
+  return `#${[color.r, color.g, color.b]
+    .map((channel) => channel.toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
 function useBoardTexture(texture: BoardPreviewTexture) {

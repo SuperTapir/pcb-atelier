@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   ProductionLayerTree,
+  resolveCrossFaceLayerDrop,
   resolveLayerDrop,
+  resolveProjectAssetDropRequest,
 } from "@/features/workspace/ProductionLayerTree";
 import type { ContentLayer, ProductionMapping } from "@/lib/core";
 
@@ -77,12 +79,27 @@ describe("ProductionLayerTree", () => {
     expect(markup).not.toContain(">内容<");
   });
 
-  it("shows objects directly under their production layer and marks shared sources", () => {
+  it("uses hierarchy and selection styling instead of redundant status copy", () => {
+    const markup = renderToStaticMarkup(<ProductionLayerTree {...baseProps} />);
+
+    expect(markup).not.toContain("正反面共享");
+    expect(markup).not.toContain("顶面");
+    expect(markup).not.toContain("底面");
+    expect(markup).not.toContain("焦点");
+    expect(markup).not.toContain("无对象");
+    expect(markup).not.toContain('aria-label="隔离正面铜层"');
+    expect(markup).not.toContain('aria-label="取消隔离正面铜层"');
+    expect(markup).not.toContain("更多操作");
+    expect(markup).not.toContain("lucide-ellipsis");
+    expect(markup).toContain('aria-label="Logo 图层菜单"');
+  });
+
+  it("shows objects directly under their production layer without exposing mapping jargon", () => {
     const markup = renderToStaticMarkup(<ProductionLayerTree {...baseProps} />);
 
     expect(markup).toContain("Logo");
-    expect(markup).toContain("关联");
-    expect(markup).toContain("同一源对象 source-1");
+    expect(markup).not.toContain("关联");
+    expect(markup).not.toContain("同一源对象 source-1");
   });
 
   it("uses distinct semantic icons for each source object kind", () => {
@@ -135,6 +152,27 @@ describe("ProductionLayerTree", () => {
     expect(markup).toContain('aria-label="展开正面丝印层"');
   });
 
+  it("exposes every production layer as a project-media drop target", () => {
+    const markup = renderToStaticMarkup(<ProductionLayerTree {...baseProps} />);
+
+    expect(markup).toContain('data-project-asset-drop-face="front"');
+    expect(markup).toContain('data-project-asset-drop-context="silkscreen"');
+    expect(
+      resolveProjectAssetDropRequest(
+        '{"assetId":"asset-logo"}',
+        "back",
+        "solderMaskOpen",
+      ),
+    ).toEqual({
+      assetId: "asset-logo",
+      face: "back",
+      productionLayer: "solderMaskOpen",
+    });
+    expect(
+      resolveProjectAssetDropRequest("not-json", "front", "copper"),
+    ).toBeNull();
+  });
+
   it("offers board fill only inside an active copper container", () => {
     const copperMarkup = renderToStaticMarkup(
       <ProductionLayerTree {...baseProps} />,
@@ -184,6 +222,23 @@ describe("ProductionLayerTree", () => {
         "inside",
       ),
     ).toBeNull();
+  });
+
+  it("resolves moving a front layer into a group on the back face", () => {
+    const targetGroup = groupLayer("back-group", null);
+
+    expect(
+      resolveCrossFaceLayerDrop(
+        [layer],
+        [targetGroup],
+        layer.id,
+        targetGroup.id,
+        "inside",
+      ),
+    ).toEqual({
+      newParentId: targetGroup.id,
+      newIndex: 1,
+    });
   });
 });
 

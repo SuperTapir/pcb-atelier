@@ -30,3 +30,41 @@ export function cycleOverlappingSelection(
   const index = candidates.indexOf(current.at(-1) ?? "");
   return [candidates[(index + 1) % candidates.length]];
 }
+
+export function resolveTreeLayerSelection({
+  anchorId,
+  current,
+  layerId,
+  orderedLayerIds,
+  rangeKey,
+  toggleKey,
+}: {
+  anchorId: string | null;
+  current: string[];
+  layerId: string;
+  orderedLayerIds: string[];
+  rangeKey: boolean;
+  toggleKey: boolean;
+}): { anchorId: string; selectedIds: string[] } {
+  if (rangeKey && anchorId) {
+    const anchorIndex = orderedLayerIds.indexOf(anchorId);
+    const targetIndex = orderedLayerIds.indexOf(layerId);
+    if (anchorIndex >= 0 && targetIndex >= 0) {
+      const start = Math.min(anchorIndex, targetIndex);
+      const end = Math.max(anchorIndex, targetIndex);
+      return {
+        anchorId,
+        selectedIds: orderedLayerIds.slice(start, end + 1),
+      };
+    }
+  }
+  if (toggleKey) {
+    return {
+      anchorId: layerId,
+      selectedIds: current.includes(layerId)
+        ? current.filter((id) => id !== layerId)
+        : [...current, layerId],
+    };
+  }
+  return { anchorId: layerId, selectedIds: [layerId] };
+}

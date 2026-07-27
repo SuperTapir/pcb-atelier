@@ -1,8 +1,8 @@
 use atelier_core::{
     AssetReference, AtelierDocument, CardSide, CombineMode, CommandError, CommandHistory,
     ContentKind, ContentLayer, DocumentCommand, FaceProductionLayer, ImageContent,
-    ProductionMapping, ProductionTarget, SolderMaskColor, StackupPreset, TextContent, TextLayout,
-    TransformUm,
+    LayerTransferMode, ProductionMapping, ProductionTarget, SolderMaskColor, StackupPreset,
+    TextContent, TextLayout, TransformUm,
 };
 
 fn text_layer(name: &str, x_um: i64) -> ContentLayer {
@@ -410,6 +410,71 @@ fn reordering_rejects_moving_a_group_inside_its_descendant() {
 }
 
 #[test]
+fn moving_a_layer_between_production_layers_updates_ownership_atomically() {
+    let mut document = AtelierDocument::new_card("跨生产层移动", 64_000, 100_000);
+    let layer = text_layer("文字", 1_000);
+    let layer_id = layer.id;
+    document.front.layers.push(layer);
+    let silk = ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen);
+    let copper = ProductionTarget::new(CardSide::Front, FaceProductionLayer::Copper);
+    document
+        .mappings
+        .push(ProductionMapping::new(layer_id, silk, CombineMode::Add));
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::MoveLayer {
+                layer_id,
+                new_parent_id: None,
+                new_index: 0,
+                from_target: silk,
+                to_target: copper,
+            },
+        )
+        .expect("move layer to copper");
+
+    assert_eq!(document.mappings.len(), 1);
+    assert_eq!(document.mappings[0].target, copper);
+    history.undo(&mut document).expect("undo production move");
+    assert_eq!(document.mappings[0].target, silk);
+}
+
+#[test]
+fn moving_a_group_between_production_layers_moves_descendant_ownership() {
+    let mut document = AtelierDocument::new_card("组合跨生产层移动", 64_000, 100_000);
+    let group = ContentLayer::new_group("组合");
+    let group_id = group.id;
+    let mut child = text_layer("子层", 1_000);
+    child.parent_id = Some(group_id);
+    let child_id = child.id;
+    document.front.layers.extend([group, child]);
+    let silk = ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen);
+    let mask = ProductionTarget::new(CardSide::Front, FaceProductionLayer::SolderMaskOpen);
+    document
+        .mappings
+        .push(ProductionMapping::new(child_id, silk, CombineMode::Add));
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::MoveLayer {
+                layer_id: group_id,
+                new_parent_id: None,
+                new_index: 0,
+                from_target: silk,
+                to_target: mask,
+            },
+        )
+        .expect("move group to solder mask");
+
+    assert_eq!(document.mappings[0].target, mask);
+    assert_eq!(document.front.layers[1].parent_id, Some(group_id));
+}
+
+#[test]
 fn deleting_group_removes_descendants_and_their_mappings() {
     let mut document = AtelierDocument::new_card("删除组", 64_000, 100_000);
     let group = ContentLayer::new_group("组");
@@ -513,18 +578,21 @@ fn replacing_image_asset_preserves_layer_identity_transform_and_mapping() {
     let mut document = AtelierDocument::new_card("替换图片", 64_000, 100_000);
     let first_asset = atelier_core::AssetId::new();
     let replacement_asset = atelier_core::AssetId::new();
-    for (id, name) in [
-        (first_asset, "first.png"),
-        (replacement_asset, "second.png"),
+    for (id, name, sha256) in [
+        (first_asset, "first.png", "a".repeat(64)),
+        (replacement_asset, "second.png", "b".repeat(64)),
     ] {
         document.assets.push(AssetReference {
             id,
             embedded_path: format!("assets/{id}.png"),
             original_filename: name.to_owned(),
             media_type: "image/png".to_owned(),
-            sha256: name.to_owned(),
+            sha256,
             pixel_width: 100,
             pixel_height: 100,
+            folder_path: None,
+            tags: Vec::new(),
+            has_alpha: false,
         });
     }
     let transform = TransformUm::rect(7_000, 9_000, 30_000, 40_000);
@@ -561,6 +629,186 @@ fn replacing_image_asset_preserves_layer_identity_transform_and_mapping() {
 }
 
 #[test]
+fn treatment_and_manufacturer_changes_are_undoable_domain_commands() {
+    use atelier_core::{
+        CharacterProcess, ImageTreatment, ManufacturerProfileSnapshot, TreatmentRecipe,
+    };
+
+    let mut document = AtelierDocument::new_card("生产感知历史", 64_000, 100_000);
+    let asset_id = atelier_core::AssetId::new();
+    document.assets.push(AssetReference {
+        id: asset_id,
+        embedded_path: format!("assets/{asset_id}.png"),
+        original_filename: "logo.png".to_owned(),
+        media_type: "image/png".to_owned(),
+        sha256: "c".repeat(64),
+        pixel_width: 100,
+        pixel_height: 100,
+        folder_path: None,
+        tags: Vec::new(),
+        has_alpha: false,
+    });
+    let treatment = ImageTreatment::new(asset_id, TreatmentRecipe::standard_monochrome());
+    let treatment_id = treatment.id;
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::InsertImageTreatment {
+                treatment: treatment.clone(),
+            },
+        )
+        .expect("insert treatment");
+
+    let mut updated = treatment.recipe.clone();
+    updated.invert = true;
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::SetTreatmentRecipe {
+                treatment_id,
+                recipe: updated.clone(),
+            },
+        )
+        .expect("update treatment");
+    assert_eq!(document.image_treatments[0].recipe, updated);
+    history.undo(&mut document).expect("undo treatment edit");
+    assert!(!document.image_treatments[0].recipe.invert);
+    history.redo(&mut document).expect("redo treatment edit");
+    assert!(document.image_treatments[0].recipe.invert);
+
+    let mut profile = ManufacturerProfileSnapshot::jlcpcb_fr4_2026_04();
+    profile.solder_mask = atelier_core::SolderMaskColor::White;
+    profile.character_process = CharacterProcess::StandardBlack;
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::SetManufacturerProfile {
+                profile: profile.clone(),
+            },
+        )
+        .expect("update manufacturer profile");
+    assert_eq!(document.manufacturer_profile, profile);
+    history.undo(&mut document).expect("undo manufacturer edit");
+    assert_ne!(document.manufacturer_profile, profile);
+}
+
+#[test]
+fn image_production_mode_change_is_undoable_and_validated() {
+    use atelier_core::{CharacterProcess, ImageProductionMode, ImageTreatment, TreatmentRecipe};
+
+    let mut document = AtelierDocument::new_card("彩色处理模式", 64_000, 100_000);
+    let asset_id = atelier_core::AssetId::new();
+    document.assets.push(atelier_core::ProjectAsset::fixture(
+        asset_id,
+        "color.png",
+        &"a".repeat(64),
+    ));
+    document.assets[0].media_type = "image/png".to_owned();
+    let treatment = ImageTreatment::new(asset_id, TreatmentRecipe::standard_monochrome());
+    let treatment_id = treatment.id;
+    document.image_treatments.push(treatment);
+    document.stackup.solder_mask_color = SolderMaskColor::White;
+    document.manufacturer_profile.solder_mask = SolderMaskColor::White;
+    document.manufacturer_profile.character_process = CharacterProcess::Multicolor;
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::SetImageProductionMode {
+                treatment_id,
+                production_mode: ImageProductionMode::ColorOriginal,
+            },
+        )
+        .expect("enable color original mode");
+    assert_eq!(
+        document.image_treatments[0].production_mode,
+        ImageProductionMode::ColorOriginal
+    );
+
+    history.undo(&mut document).expect("undo production mode");
+    assert_eq!(
+        document.image_treatments[0].production_mode,
+        ImageProductionMode::MonochromeMask
+    );
+}
+
+#[test]
+fn replacing_one_image_instance_clones_its_treatment_and_is_atomic() {
+    use atelier_core::{ImageTreatment, TreatmentRecipe};
+
+    let mut document = AtelierDocument::new_card("替换当前实例", 64_000, 100_000);
+    let original = atelier_core::AssetId::new();
+    let replacement = atelier_core::AssetId::new();
+    for (id, name, sha256) in [
+        (original, "old.png", "d".repeat(64)),
+        (replacement, "new.png", "e".repeat(64)),
+    ] {
+        document.assets.push(AssetReference {
+            id,
+            embedded_path: format!("assets/{id}.png"),
+            original_filename: name.to_owned(),
+            media_type: "image/png".to_owned(),
+            sha256,
+            pixel_width: 100,
+            pixel_height: 100,
+            folder_path: None,
+            tags: Vec::new(),
+            has_alpha: false,
+        });
+    }
+    let treatment = ImageTreatment::new(original, TreatmentRecipe::standard_monochrome());
+    let treatment_id = treatment.id;
+    document.image_treatments.push(treatment);
+    let image = ContentLayer::new_image(
+        "Logo",
+        original,
+        TransformUm::rect(1_000, 2_000, 10_000, 10_000),
+    );
+    let layer_id = image.id;
+    document.front.layers.push(image);
+    let mut mapping = ProductionMapping::new(
+        layer_id,
+        ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen),
+        CombineMode::Add,
+    );
+    mapping.treatment_id = Some(treatment_id);
+    document.mappings.push(mapping);
+    let before = document.clone();
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::ReplaceImageInstanceAsset {
+                layer_id,
+                asset_id: replacement,
+            },
+        )
+        .expect("replace current instance");
+
+    let ContentKind::Image(image) = &document.front.layers[0].kind else {
+        panic!("image layer");
+    };
+    assert_eq!(image.asset_id, replacement);
+    let replacement_treatment_id = document.mappings[0].treatment_id.unwrap();
+    assert_ne!(replacement_treatment_id, treatment_id);
+    assert_eq!(
+        document
+            .image_treatments
+            .iter()
+            .find(|treatment| treatment.id == replacement_treatment_id)
+            .unwrap()
+            .asset_id,
+        replacement
+    );
+
+    history.undo(&mut document).expect("single undo");
+    assert_eq!(document, before);
+}
+
+#[test]
 fn content_specific_commands_reject_the_wrong_layer_kind() {
     let mut document = AtelierDocument::new_card("类型", 64_000, 100_000);
     let layer = text_layer("文字", 1_000);
@@ -594,6 +842,7 @@ fn content_specific_commands_reject_the_wrong_layer_kind() {
 fn stackup_changes_are_undoable_domain_commands() {
     let mut document = AtelierDocument::new_card("叠层", 64_000, 100_000);
     let original = document.stackup.clone();
+    let original_profile = document.manufacturer_profile.clone();
     let updated = StackupPreset {
         solder_mask_color: SolderMaskColor::Purple,
         ..StackupPreset::default()
@@ -609,7 +858,296 @@ fn stackup_changes_are_undoable_domain_commands() {
         )
         .expect("set stackup");
     assert_eq!(document.stackup, updated);
+    assert_eq!(
+        document.manufacturer_profile.solder_mask,
+        updated.solder_mask_color
+    );
 
     history.undo(&mut document).expect("undo stackup");
     assert_eq!(document.stackup, original);
+    assert_eq!(document.manufacturer_profile, original_profile);
+}
+
+#[test]
+fn duplicate_image_reuses_asset_and_treatment_with_new_instance_and_mapping_ids() {
+    use atelier_core::{ImageTreatment, TreatmentRecipe};
+
+    let mut document = AtelierDocument::new_card("副本", 64_000, 100_000);
+    let asset_id = atelier_core::AssetId::new();
+    document.assets.push(AssetReference {
+        id: asset_id,
+        embedded_path: format!("assets/{asset_id}.png"),
+        original_filename: "logo.png".to_owned(),
+        media_type: "image/png".to_owned(),
+        sha256: "f".repeat(64),
+        pixel_width: 100,
+        pixel_height: 100,
+        folder_path: None,
+        tags: Vec::new(),
+        has_alpha: true,
+    });
+    let treatment = ImageTreatment::new(asset_id, TreatmentRecipe::standard_monochrome());
+    let treatment_id = treatment.id;
+    document.image_treatments.push(treatment);
+    let layer = ContentLayer::new_image(
+        "Logo",
+        asset_id,
+        TransformUm::rect(10_000, 20_000, 12_000, 8_000),
+    );
+    let source_layer_id = layer.id;
+    document.front.layers.push(layer);
+    let mut mapping = ProductionMapping::new(
+        source_layer_id,
+        ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen),
+        CombineMode::Add,
+    );
+    mapping.treatment_id = Some(treatment_id);
+    document.mappings.push(mapping);
+    let before = document.clone();
+    let duplicate_layer_id = atelier_core::LayerId::new();
+    let duplicate_mapping_id = atelier_core::MappingId::new();
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::DuplicateLayer {
+                layer_id: source_layer_id,
+                duplicate_layer_id,
+                duplicate_mapping_ids: vec![duplicate_mapping_id],
+                offset_um: 2_000,
+            },
+        )
+        .expect("duplicate image");
+
+    let duplicate = document
+        .front
+        .layers
+        .iter()
+        .find(|layer| layer.id == duplicate_layer_id)
+        .expect("duplicate layer");
+    let ContentKind::Image(image) = &duplicate.kind else {
+        panic!("duplicate image");
+    };
+    assert_eq!(image.asset_id, asset_id);
+    assert_eq!(duplicate.transform.x_um, 12_000);
+    assert_eq!(duplicate.transform.y_um, 22_000);
+    let duplicate_mapping = document
+        .mappings
+        .iter()
+        .find(|mapping| mapping.id == duplicate_mapping_id)
+        .expect("duplicate mapping");
+    assert_eq!(duplicate_mapping.source_layer_id, duplicate_layer_id);
+    assert_eq!(duplicate_mapping.treatment_id, Some(treatment_id));
+    assert_eq!(document.image_treatments.len(), 1);
+
+    history.undo(&mut document).expect("single undo");
+    assert_eq!(document, before);
+}
+
+#[test]
+fn copying_a_layer_to_the_other_face_preserves_geometry_and_retargets_mapping() {
+    let mut document = AtelierDocument::new_card("跨面复制", 64_000, 100_000);
+    let layer = text_layer("正面文字", 7_000);
+    let source_layer_id = layer.id;
+    document.front.layers.push(layer);
+    let source_target = ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen);
+    document.mappings.push(ProductionMapping::new(
+        source_layer_id,
+        source_target,
+        CombineMode::Add,
+    ));
+    let duplicate_layer_id = atelier_core::LayerId::new();
+    let duplicate_mapping_id = atelier_core::MappingId::new();
+    let target = ProductionTarget::new(CardSide::Back, FaceProductionLayer::Copper);
+    let before = document.clone();
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::TransferLayers {
+                layer_ids: vec![source_layer_id],
+                target,
+                new_parent_id: None,
+                new_index: 0,
+                mode: LayerTransferMode::Copy,
+                duplicate_layer_ids: vec![duplicate_layer_id],
+                duplicate_mapping_ids: vec![duplicate_mapping_id],
+                offset_um: 0,
+            },
+        )
+        .expect("copy layer to back");
+
+    assert_eq!(document.front.layers.len(), 1);
+    assert_eq!(document.back.layers.len(), 1);
+    assert_eq!(document.back.layers[0].id, duplicate_layer_id);
+    assert_eq!(
+        document.back.layers[0].transform,
+        document.front.layers[0].transform
+    );
+    assert_eq!(
+        document
+            .mappings
+            .iter()
+            .find(|mapping| mapping.id == duplicate_mapping_id)
+            .expect("copied mapping")
+            .target,
+        target,
+    );
+
+    history.undo(&mut document).expect("copy is one undo step");
+    assert_eq!(document, before);
+}
+
+#[test]
+fn moving_a_group_to_the_other_face_moves_the_subtree_atomically() {
+    let mut document = AtelierDocument::new_card("跨面剪切", 64_000, 100_000);
+    let group = ContentLayer::new_group("组合");
+    let group_id = group.id;
+    let mut child = text_layer("子层", 3_000);
+    child.parent_id = Some(group_id);
+    let child_id = child.id;
+    document.front.layers.extend([group, child]);
+    document.mappings.push(ProductionMapping::new(
+        child_id,
+        ProductionTarget::new(CardSide::Front, FaceProductionLayer::Silkscreen),
+        CombineMode::Add,
+    ));
+    let target = ProductionTarget::new(CardSide::Back, FaceProductionLayer::Silkscreen);
+    let before = document.clone();
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::TransferLayers {
+                layer_ids: vec![group_id],
+                target,
+                new_parent_id: None,
+                new_index: 0,
+                mode: LayerTransferMode::Move,
+                duplicate_layer_ids: vec![],
+                duplicate_mapping_ids: vec![],
+                offset_um: 0,
+            },
+        )
+        .expect("move group to back");
+
+    assert!(document.front.layers.is_empty());
+    assert_eq!(
+        document
+            .back
+            .layers
+            .iter()
+            .map(|layer| layer.id)
+            .collect::<Vec<_>>(),
+        vec![group_id, child_id],
+    );
+    assert_eq!(document.back.layers[1].parent_id, Some(group_id));
+    assert_eq!(document.mappings[0].target, target);
+
+    history.undo(&mut document).expect("move is one undo step");
+    assert_eq!(document, before);
+}
+
+#[test]
+fn extracted_layers_can_be_pasted_after_the_cut_has_removed_them() {
+    let mut document = AtelierDocument::new_card("立即剪切", 64_000, 100_000);
+    let layer = text_layer("待剪切", 4_000);
+    let layer_id = layer.id;
+    let target = ProductionTarget::new(CardSide::Back, FaceProductionLayer::Silkscreen);
+    let mapping = ProductionMapping::new(
+        layer_id,
+        ProductionTarget::new(CardSide::Front, FaceProductionLayer::Copper),
+        CombineMode::Add,
+    );
+    document.front.layers.push(layer.clone());
+    document.mappings.push(mapping.clone());
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::DeleteLayers {
+                layer_ids: vec![layer_id],
+            },
+        )
+        .expect("cut removes source immediately");
+    assert!(document.front.layers.is_empty());
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::PasteLayers {
+                layers: vec![layer],
+                mappings: vec![mapping],
+                target,
+                new_parent_id: None,
+                new_index: 0,
+            },
+        )
+        .expect("paste extracted layer");
+
+    assert_eq!(document.back.layers[0].id, layer_id);
+    assert_eq!(document.mappings[0].target, target);
+}
+
+#[test]
+fn multi_layer_transform_is_atomic_and_undoes_as_one_step() {
+    let mut document = AtelierDocument::new_card("多选移动", 64_000, 100_000);
+    let first = text_layer("A", 1_000);
+    let second = text_layer("B", 15_000);
+    let first_id = first.id;
+    let second_id = second.id;
+    document.front.layers.extend([first, second]);
+    let before = document.clone();
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::TransformLayers {
+                transforms: vec![
+                    atelier_core::LayerTransform {
+                        layer_id: first_id,
+                        transform: TransformUm::rect(3_000, 4_000, 10_000, 5_000),
+                    },
+                    atelier_core::LayerTransform {
+                        layer_id: second_id,
+                        transform: TransformUm::rect(17_000, 4_000, 10_000, 5_000),
+                    },
+                ],
+            },
+        )
+        .expect("move selected layers");
+
+    assert_eq!(document.front.layers[0].transform.x_um, 3_000);
+    assert_eq!(document.front.layers[1].transform.x_um, 17_000);
+    history.undo(&mut document).expect("single undo");
+    assert_eq!(document, before);
+}
+
+#[test]
+fn multi_layer_delete_is_atomic_and_undoes_as_one_step() {
+    let mut document = AtelierDocument::new_card("多选删除", 64_000, 100_000);
+    let first = text_layer("A", 1_000);
+    let second = text_layer("B", 15_000);
+    let ids = vec![first.id, second.id];
+    document.front.layers.extend([first, second]);
+    let before = document.clone();
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            &mut document,
+            DocumentCommand::DeleteLayers {
+                layer_ids: ids.clone(),
+            },
+        )
+        .expect("delete selected layers");
+
+    assert!(document.front.layers.is_empty());
+    history.undo(&mut document).expect("single undo");
+    assert_eq!(document, before);
 }

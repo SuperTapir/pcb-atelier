@@ -109,11 +109,17 @@ try {
   const result = await page.evaluate(() => window.__KONVA_BENCHMARK__);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   const dualBoardContractPassed =
-    result?.version === 2 &&
+    result?.version === 3 &&
     result.scene.boardCount === 2 &&
     result.scene.objectsPerFace === 100 &&
     result.scene.editableObjects === 200 &&
-    result.checks.inactiveBoard === true;
+    result.gestures.panUpdates === 360 &&
+    result.gestures.dragUpdates === 360 &&
+    result.gestures.p95Ms <= 16.7 &&
+    result.checks.inactiveBoard === true &&
+    result.checks.noProductionCompile === true &&
+    result.checks.noIpc === true &&
+    result.checks.noSynchronousIpc === true;
   if (
     !result?.passed ||
     result.checks.heap !== true ||

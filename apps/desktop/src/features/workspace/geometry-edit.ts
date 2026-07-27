@@ -73,6 +73,29 @@ export interface SnapTransformResult {
   bypassed: boolean;
 }
 
+export function resizeWithLockedAspectRatio(
+  widthUm: number,
+  heightUm: number,
+  changedAxis: "width" | "height",
+  nextValueUm: number,
+): { widthUm: number; heightUm: number } {
+  if (widthUm <= 0 || heightUm <= 0 || nextValueUm <= 0) {
+    throw new GeometryEditError(
+      "nonPositiveSize",
+      "宽度和高度必须大于 0",
+    );
+  }
+  return changedAxis === "width"
+    ? {
+        widthUm: nextValueUm,
+        heightUm: Math.max(1, Math.round((nextValueUm * heightUm) / widthUm)),
+      }
+    : {
+        widthUm: Math.max(1, Math.round((nextValueUm * widthUm) / heightUm)),
+        heightUm: nextValueUm,
+      };
+}
+
 export type TransformPatch = Partial<TransformUm>;
 type AnchorName = "left" | "centerX" | "right" | "top" | "centerY" | "bottom";
 

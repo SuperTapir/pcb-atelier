@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
 pub const PROJECT_FORMAT: &str = "pcb-atelier";
-pub const MIN_SUPPORTED_PROJECT_SCHEMA_VERSION: u32 = 1;
-pub const PROJECT_SCHEMA_VERSION: u32 = 2;
-const BOARD_FILL_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_SCHEMA_VERSION: u32 = 4;
+pub const MIN_SUPPORTED_PROJECT_SCHEMA_VERSION: u32 = PROJECT_SCHEMA_VERSION;
 
 macro_rules! uuid_id {
     ($name:ident) => {
@@ -41,9 +40,10 @@ uuid_id!(DocumentId);
 uuid_id!(LayerId);
 uuid_id!(MappingId);
 uuid_id!(AssetId);
+uuid_id!(TreatmentId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AtelierDocument {
     pub format: String,
     pub schema_version: u32,
@@ -54,7 +54,9 @@ pub struct AtelierDocument {
     pub front: CardFace,
     pub back: CardFace,
     pub assets: Vec<AssetReference>,
+    pub image_treatments: Vec<crate::ImageTreatment>,
     pub mappings: Vec<ProductionMapping>,
+    pub manufacturer_profile: crate::ManufacturerProfileSnapshot,
     pub mechanical_features: Vec<MechanicalFeature>,
 }
 
@@ -74,7 +76,9 @@ impl AtelierDocument {
             front: CardFace::new(CardSide::Front),
             back: CardFace::new(CardSide::Back),
             assets: Vec::new(),
+            image_treatments: Vec::new(),
             mappings: Vec::new(),
+            manufacturer_profile: crate::ManufacturerProfileSnapshot::default(),
             mechanical_features: Vec::new(),
         }
     }
@@ -100,7 +104,47 @@ impl AtelierDocument {
         validate_board_fills(self)?;
         validate_assets(&self.assets)?;
         validate_image_asset_references(&self.front, &self.back, &self.assets)?;
-        validate_mappings(&self.mappings, &layers, &self.front, &self.back)?;
+        self.manufacturer_profile
+            .validate()
+            .map_err(DocumentError::InvalidManufacturerProfile)?;
+        validate_treatments(
+            &self.image_treatments,
+            &self.assets,
+            &self.manufacturer_profile,
+        )?;
+        validate_mappings(
+            &self.mappings,
+            &layers,
+            &self.front,
+            &self.back,
+            &self.image_treatments,
+        )?;
+        let mut mirror_errors = Vec::new();
+        if self.stackup.substrate != self.manufacturer_profile.substrate {
+            mirror_errors.push(
+                "manufacturer profile substrate must match document stackup substrate".to_owned(),
+            );
+        }
+        if self.stackup.thickness_um != self.manufacturer_profile.thickness_um {
+            mirror_errors.push(
+                "manufacturer profile thickness must match document stackup thickness".to_owned(),
+            );
+        }
+        if self.stackup.solder_mask_color != self.manufacturer_profile.solder_mask {
+            mirror_errors.push(
+                "manufacturer profile solder mask must match document stackup solder mask"
+                    .to_owned(),
+            );
+        }
+        if self.stackup.surface_finish != self.manufacturer_profile.surface_finish {
+            mirror_errors.push(
+                "manufacturer profile surface finish must match document stackup surface finish"
+                    .to_owned(),
+            );
+        }
+        if !mirror_errors.is_empty() {
+            return Err(DocumentError::InvalidManufacturerProfile(mirror_errors));
+        }
         validate_mechanical_features(&self.mechanical_features, &self.board)?;
         Ok(())
     }
@@ -140,7 +184,7 @@ impl AtelierDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CardFace {
     pub side: CardSide,
     pub layers: Vec<ContentLayer>,
@@ -172,13 +216,14 @@ impl std::fmt::Display for CardSide {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ContentLayer {
     pub id: LayerId,
     pub name: String,
     pub visible: bool,
     pub locked: bool,
     pub export_enabled: bool,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub parent_id: Option<LayerId>,
     pub transform: TransformUm,
     pub kind: ContentKind,
@@ -251,7 +296,7 @@ impl ContentLayer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "camelCase")]
 pub enum ContentKind {
     Image(ImageContent),
     Text(TextContent),
@@ -260,20 +305,21 @@ pub enum ContentKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BoardFillContent {
     pub edge_clearance_um: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ImageContent {
     pub asset_id: AssetId,
+    #[serde(deserialize_with = "deserialize_required_option")]
     pub crop: Option<CropRect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CropRect {
     pub x_millionths: u32,
     pub y_millionths: u32,
@@ -282,7 +328,7 @@ pub struct CropRect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TextContent {
     pub text: String,
     pub font_family: String,
@@ -298,7 +344,7 @@ pub enum TextLayout {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct TransformUm {
     pub x_um: i64,
     pub y_um: i64,
@@ -387,7 +433,7 @@ pub enum DocumentDiagnostic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "camelCase")]
 pub enum BoardOutline {
     Rectangle {
         width_um: u32,
@@ -442,7 +488,7 @@ impl BoardOutline {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct StackupPreset {
     pub substrate: SubstrateMaterial,
     pub thickness_um: u32,
@@ -455,7 +501,7 @@ impl Default for StackupPreset {
         Self {
             substrate: SubstrateMaterial::Fr4,
             thickness_um: 1_600,
-            solder_mask_color: SolderMaskColor::Black,
+            solder_mask_color: SolderMaskColor::Blue,
             surface_finish: SurfaceFinish::Enig,
         }
     }
@@ -492,11 +538,13 @@ pub enum SolderMaskColor {
 #[serde(rename_all = "camelCase")]
 pub enum SurfaceFinish {
     Enig,
+    HaslLead,
     HaslLeadFree,
+    Osp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AssetReference {
     pub id: AssetId,
     pub embedded_path: String,
@@ -505,15 +553,49 @@ pub struct AssetReference {
     pub sha256: String,
     pub pixel_width: u32,
     pub pixel_height: u32,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub folder_path: Option<String>,
+    pub tags: Vec<String>,
+    pub has_alpha: bool,
+}
+
+pub(crate) fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+pub type ProjectAsset = AssetReference;
+
+impl AssetReference {
+    #[doc(hidden)]
+    pub fn fixture(id: AssetId, filename: &str, sha256: &str) -> Self {
+        Self {
+            id,
+            embedded_path: format!("assets/{id}.png"),
+            original_filename: filename.to_owned(),
+            media_type: "image/png".to_owned(),
+            sha256: sha256.to_owned(),
+            pixel_width: 1,
+            pixel_height: 1,
+            folder_path: None,
+            tags: Vec::new(),
+            has_alpha: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProductionMapping {
     pub id: MappingId,
     pub source_layer_id: LayerId,
     pub target: ProductionTarget,
     pub combine: CombineMode,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub treatment_id: Option<TreatmentId>,
 }
 
 impl ProductionMapping {
@@ -523,12 +605,13 @@ impl ProductionMapping {
             source_layer_id,
             target,
             combine,
+            treatment_id: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ProductionTarget {
     pub side: CardSide,
     pub layer: FaceProductionLayer,
@@ -576,7 +659,7 @@ pub enum CombineMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "camelCase")]
 pub enum MechanicalFeature {
     NpthRound {
         center_x_um: i64,
@@ -598,12 +681,6 @@ pub enum DocumentError {
     InvalidFormat(String),
     #[error("unsupported project schema version: {0}")]
     UnsupportedSchema(u32),
-    #[error("{feature} requires project schema {required}, but document declares schema {actual}")]
-    FeatureRequiresSchema {
-        feature: &'static str,
-        required: u32,
-        actual: u32,
-    },
     #[error("front and back faces are assigned incorrectly")]
     InvalidFaceAssignment,
     #[error("board width and height must be positive")]
@@ -649,6 +726,56 @@ pub enum DocumentError {
     LayerCycle(LayerId),
     #[error("duplicate asset id: {0}")]
     DuplicateAssetId(AssetId),
+    #[error("asset {asset_id} has invalid {field}")]
+    InvalidAssetMetadata {
+        asset_id: AssetId,
+        field: &'static str,
+    },
+    #[error("duplicate asset embedded path: {0}")]
+    DuplicateAssetEmbeddedPath(String),
+    #[error("duplicate asset SHA-256: {0}")]
+    DuplicateAssetHash(String),
+    #[error("duplicate image treatment id: {0}")]
+    DuplicateTreatmentId(TreatmentId),
+    #[error("image treatment {treatment_id} refers to missing asset {asset_id}")]
+    MissingTreatmentAsset {
+        treatment_id: TreatmentId,
+        asset_id: AssetId,
+    },
+    #[error(
+        "image treatment {treatment_id} uses unsupported algorithm version: {algorithm_version}"
+    )]
+    InvalidTreatmentAlgorithmVersion {
+        treatment_id: TreatmentId,
+        algorithm_version: String,
+    },
+    #[error("image treatment {0} has an invalid crop")]
+    InvalidTreatmentCrop(TreatmentId),
+    #[error(
+        "图片处理 {treatment_id} 的彩色原图模式需要在制造配置中启用彩色丝印；请先选择受支持的多色字符工艺组合"
+    )]
+    ColorOriginalRequiresMulticolorProfile { treatment_id: TreatmentId },
+    #[error("图片处理 {treatment_id} 的彩色原图模式仅支持 PNG/JPEG，当前素材类型为 {media_type}")]
+    UnsupportedColorOriginalMedia {
+        treatment_id: TreatmentId,
+        media_type: String,
+    },
+    #[error("图片处理 {treatment_id} 的彩色原图模式只能映射到 silkscreen，当前目标为 {target}")]
+    ColorOriginalRequiresSilkscreen {
+        treatment_id: TreatmentId,
+        target: &'static str,
+    },
+    #[error("production mapping refers to missing image treatment: {0}")]
+    MissingMappedTreatment(TreatmentId),
+    #[error(
+        "production mapping treatment {treatment_id} does not belong to image asset {asset_id}"
+    )]
+    TreatmentAssetMismatch {
+        treatment_id: TreatmentId,
+        asset_id: AssetId,
+    },
+    #[error("invalid manufacturer profile: {0:?}")]
+    InvalidManufacturerProfile(Vec<String>),
     #[error("content layer {layer_id} refers to missing image asset {asset_id}")]
     MissingImageAsset {
         layer_id: LayerId,
@@ -773,13 +900,6 @@ fn validate_board_fills(document: &AtelierDocument) -> Result<(), DocumentError>
                 });
             }
             first_fill_id = Some(layer.id);
-            if document.schema_version < BOARD_FILL_SCHEMA_VERSION {
-                return Err(DocumentError::FeatureRequiresSchema {
-                    feature: "board fill",
-                    required: BOARD_FILL_SCHEMA_VERSION,
-                    actual: document.schema_version,
-                });
-            }
             if fill.edge_clearance_um.saturating_mul(2)
                 >= document.board.width_um().min(document.board.height_um())
             {
@@ -795,9 +915,48 @@ fn validate_board_fills(document: &AtelierDocument) -> Result<(), DocumentError>
 
 fn validate_assets(assets: &[AssetReference]) -> Result<(), DocumentError> {
     let mut ids = HashSet::new();
+    let mut embedded_paths = HashSet::new();
+    let mut hashes = HashSet::new();
     for asset in assets {
         if !ids.insert(asset.id) {
             return Err(DocumentError::DuplicateAssetId(asset.id));
+        }
+        if asset.original_filename.trim().is_empty() {
+            return Err(DocumentError::InvalidAssetMetadata {
+                asset_id: asset.id,
+                field: "original filename",
+            });
+        }
+        if asset.media_type.trim().is_empty() {
+            return Err(DocumentError::InvalidAssetMetadata {
+                asset_id: asset.id,
+                field: "media type",
+            });
+        }
+        if asset.pixel_width == 0 || asset.pixel_height == 0 {
+            return Err(DocumentError::InvalidAssetMetadata {
+                asset_id: asset.id,
+                field: "pixel dimensions",
+            });
+        }
+        if asset.sha256.len() != 64
+            || !asset
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(DocumentError::InvalidAssetMetadata {
+                asset_id: asset.id,
+                field: "SHA-256",
+            });
+        }
+        if !hashes.insert(asset.sha256.clone()) {
+            return Err(DocumentError::DuplicateAssetHash(asset.sha256.clone()));
+        }
+        if !embedded_paths.insert(asset.embedded_path.clone()) {
+            return Err(DocumentError::DuplicateAssetEmbeddedPath(
+                asset.embedded_path.clone(),
+            ));
         }
         let path = std::path::Path::new(&asset.embedded_path);
         if path.is_absolute()
@@ -836,11 +995,60 @@ fn validate_image_asset_references(
     Ok(())
 }
 
+fn validate_treatments(
+    treatments: &[crate::ImageTreatment],
+    assets: &[AssetReference],
+    manufacturer_profile: &crate::ManufacturerProfileSnapshot,
+) -> Result<(), DocumentError> {
+    let assets = assets
+        .iter()
+        .map(|asset| (asset.id, asset))
+        .collect::<HashMap<_, _>>();
+    let mut treatment_ids = HashSet::new();
+    for treatment in treatments {
+        if !treatment_ids.insert(treatment.id) {
+            return Err(DocumentError::DuplicateTreatmentId(treatment.id));
+        }
+        let Some(asset) = assets.get(&treatment.asset_id) else {
+            return Err(DocumentError::MissingTreatmentAsset {
+                treatment_id: treatment.id,
+                asset_id: treatment.asset_id,
+            });
+        };
+        treatment.recipe.validate().map_err(|error| match error {
+            crate::TreatmentRecipeValidationError::UnsupportedAlgorithmVersion(
+                algorithm_version,
+            ) => DocumentError::InvalidTreatmentAlgorithmVersion {
+                treatment_id: treatment.id,
+                algorithm_version,
+            },
+            crate::TreatmentRecipeValidationError::InvalidCrop => {
+                DocumentError::InvalidTreatmentCrop(treatment.id)
+            }
+        })?;
+        if treatment.production_mode == crate::ImageProductionMode::ColorOriginal {
+            if !manufacturer_profile.supports_color_original_silkscreen() {
+                return Err(DocumentError::ColorOriginalRequiresMulticolorProfile {
+                    treatment_id: treatment.id,
+                });
+            }
+            if !matches!(asset.media_type.as_str(), "image/png" | "image/jpeg") {
+                return Err(DocumentError::UnsupportedColorOriginalMedia {
+                    treatment_id: treatment.id,
+                    media_type: asset.media_type.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_mappings(
     mappings: &[ProductionMapping],
     layers: &HashMap<LayerId, CardSide>,
     front: &CardFace,
     back: &CardFace,
+    treatments: &[crate::ImageTreatment],
 ) -> Result<(), DocumentError> {
     let mut ids = HashSet::new();
     let mut targets = HashSet::new();
@@ -865,6 +1073,29 @@ fn validate_mappings(
             .chain(&back.layers)
             .find(|layer| layer.id == mapping.source_layer_id)
             .expect("mapped layer existence was checked above");
+        if let Some(treatment_id) = mapping.treatment_id {
+            let treatment = treatments
+                .iter()
+                .find(|treatment| treatment.id == treatment_id)
+                .ok_or(DocumentError::MissingMappedTreatment(treatment_id))?;
+            let ContentKind::Image(image) = &source.kind else {
+                return Err(DocumentError::MissingMappedTreatment(treatment_id));
+            };
+            if treatment.asset_id != image.asset_id {
+                return Err(DocumentError::TreatmentAssetMismatch {
+                    treatment_id,
+                    asset_id: image.asset_id,
+                });
+            }
+            if treatment.production_mode == crate::ImageProductionMode::ColorOriginal
+                && mapping.target.layer != FaceProductionLayer::Silkscreen
+            {
+                return Err(DocumentError::ColorOriginalRequiresSilkscreen {
+                    treatment_id,
+                    target: mapping.target.canonical_name(),
+                });
+            }
+        }
         if matches!(source.kind, ContentKind::BoardFill(_))
             && mapping.target.layer != FaceProductionLayer::Copper
         {

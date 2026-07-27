@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator } from "./test";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
@@ -40,7 +40,7 @@ test("无效尺寸回退，锁定对象禁用检查器并阻止键盘变换", as
   await group
     .getByRole("button", { name: "正面组合", exact: true })
     .click({ button: "right" });
-  await page.getByRole("button", { name: "锁定", exact: true }).click();
+  await page.getByRole("menuitem", { name: "锁定", exact: true }).click();
   await expect(group).toHaveAttribute("aria-selected", "true");
 
   const x = page.getByRole("textbox", { name: "X (mm)" });
@@ -51,6 +51,13 @@ test("无效尺寸回退，锁定对象禁用检查器并阻止键盘变换", as
 });
 
 test("画布拖动显示吸附 guide，按住 Alt 临时绕过", async ({ page }) => {
+  const gestureCommands: string[] = [];
+  let gestureActive = false;
+  page.on("request", (request) => {
+    if (!gestureActive || !request.url().endsWith("/__atelier_bridge")) return;
+    const payload = request.postDataJSON() as { command?: string } | null;
+    if (payload?.command) gestureCommands.push(payload.command);
+  });
   const tree = page.getByRole("tree", { name: "板体与生产层" });
   await selectLayer(tree, "正面说明");
   const xInput = page.getByRole("textbox", { name: "X (mm)" });
@@ -64,17 +71,28 @@ test("画布拖动显示吸附 guide，按住 Alt 临时绕过", async ({ page }
   const canvas = page.getByTestId("workspace-canvas-front");
   const box = await canvas.boundingBox();
   expect(box).not.toBeNull();
-  const boardLeft = box!.x + (box!.width - 85.6 * 5.5) / 2;
-  const boardTop = box!.y + (box!.height - 53.98 * 5.5) / 2;
-  const startX = boardLeft + (Number(await xInput.inputValue()) + 2) * 5.5;
-  const startY = boardTop + (Number(await yInput.inputValue()) + 2) * 5.5;
+  const viewport = await canvas.evaluate((element) => ({
+    panX: Number((element as HTMLElement).dataset.viewportPanX),
+    panY: Number((element as HTMLElement).dataset.viewportPanY),
+    zoom: Number((element as HTMLElement).dataset.viewportZoom),
+  }));
+  const scale = 5.5 * viewport.zoom;
+  const boardLeft =
+    box!.x + box!.width / 2 - (85.6 * scale) / 2 + viewport.panX;
+  const boardTop =
+    box!.y + box!.height / 2 - (53.98 * scale) / 2 + viewport.panY;
+  const startX = boardLeft + (Number(await xInput.inputValue()) + 2) * scale;
+  const startY = boardTop + (Number(await yInput.inputValue()) + 2) * scale;
 
+  gestureActive = true;
   await page.mouse.move(startX, startY);
   await page.mouse.down();
   await page.mouse.move(startX + 4, startY, { steps: 4 });
   await expect(page.getByTestId("snap-guides-front")).toContainText(
     "X 对齐到 25.000 mm 网格",
   );
+  expect(gestureCommands).toEqual([]);
+  gestureActive = false;
   await page.mouse.up();
   await expect(page.getByTestId("snap-guides-front")).toHaveCount(0);
   await expect(xInput).toHaveValue("13.000");
@@ -83,13 +101,26 @@ test("画布拖动显示吸附 guide，按住 Alt 临时绕过", async ({ page }
   await xInput.press("Enter");
   await expect(page.getByText("变换已更新", { exact: true })).toBeVisible();
   await page.keyboard.down("Alt");
+  gestureCommands.length = 0;
+  gestureActive = true;
   await page.mouse.move(startX, startY);
   await page.mouse.down();
   await page.mouse.move(startX + 4, startY, { steps: 4 });
   await expect(page.getByTestId("snap-guides-front")).toHaveCount(0);
+  expect(gestureCommands).toEqual([]);
+  gestureActive = false;
   await page.mouse.up();
   await page.keyboard.up("Alt");
   await expect(xInput).not.toHaveValue("13.000");
+
+  gestureCommands.length = 0;
+  gestureActive = true;
+  await page.mouse.move(box!.x + 24, box!.y + 24);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(box!.x + 64, box!.y + 48, { steps: 12 });
+  expect(gestureCommands).toEqual([]);
+  gestureActive = false;
+  await page.mouse.up({ button: "right" });
 });
 
 async function selectLayer(tree: Locator, name: string) {

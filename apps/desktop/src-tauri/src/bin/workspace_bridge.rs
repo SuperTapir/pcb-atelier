@@ -40,6 +40,17 @@ fn handle_request(
         request.respond(Response::from_string(r#"{"status":"ok"}"#).with_header(content_type))?;
         return Ok(());
     }
+    if request.method() == &Method::Post && request.url() == "/reset" {
+        *service
+            .lock()
+            .map_err(|_| "workspace bridge lock is poisoned")? =
+            WorkspaceService::new(local_development_document());
+        let content_type = Header::from_bytes("Content-Type", "application/json")
+            .expect("static header must be valid");
+        request
+            .respond(Response::from_string(r#"{"status":"reset"}"#).with_header(content_type))?;
+        return Ok(());
+    }
     if request.method() != &Method::Post || request.url() != "/workspace" {
         request.respond(Response::empty(StatusCode(404)))?;
         return Ok(());
@@ -79,27 +90,27 @@ fn local_development_document() -> atelier_core::AtelierDocument {
     group.transform = TransformUm::rect(8_000, 8_000, 24_000, 6_000);
     let mut front_title = ContentLayer::new_text(
         "正面标题",
-        "F",
+        "·",
         TransformUm::rect(8_000, 8_000, 24_000, 6_000),
     );
     front_title.parent_id = Some(group.id);
     let front_title_id = front_title.id;
     let front_caption = ContentLayer::new_text(
         "正面说明",
-        "Front",
+        " ",
         TransformUm::rect(12_000, 8_000, 24_000, 6_000),
     );
     let front_caption_id = front_caption.id;
     document.front.layers = vec![front_title, front_caption, group];
     let back_mark = ContentLayer::new_text(
         "背面标记",
-        "B",
+        "·",
         TransformUm::rect(8_000, 8_000, 24_000, 6_000),
     );
     let back_mark_id = back_mark.id;
     let back_caption = ContentLayer::new_text(
         "背面说明",
-        "Back",
+        " ",
         TransformUm::rect(12_000, 8_000, 24_000, 6_000),
     );
     let back_caption_id = back_caption.id;

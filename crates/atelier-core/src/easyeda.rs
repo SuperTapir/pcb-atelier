@@ -23,7 +23,8 @@ use zip::write::SimpleFileOptions;
 
 use crate::{
     BoardOutline, BoardToEasyedaTransform, MechanicalFeature, ProductionTarget,
-    ResolvedFabricationBoard, atomic_write_validated, easyeda_paths, polygonize_mask,
+    ResolvedFabricationBoard, SamplingPurpose, atomic_write_validated, easyeda_paths,
+    polygonize_mask,
 };
 
 const FORMAT: &str = "atelier-easyeda-public-v1";
@@ -268,6 +269,12 @@ pub(crate) fn parse_records(epru: &str) -> Result<Vec<(Value, Value)>, EasyedaPu
 
 pub fn preflight_resolved_board(board: &ResolvedFabricationBoard) -> EasyedaPreflight {
     let mut errors = Vec::new();
+    if board.build.sampling_purpose != Some(SamplingPurpose::FormalProduction)
+        || board.build.pixel_pitch_um != SamplingPurpose::FormalProduction.default_pixel_pitch_um()
+    {
+        errors
+            .push("EasyEDA export requires a formalProduction resolved board at 25 um".to_owned());
+    }
     let expected_layers = [
         "topCopper",
         "topSolderMaskOpen",
@@ -354,21 +361,25 @@ fn build_epru(
     let mut fill_count = 0;
     for layer in &board.layers {
         let layer_id = easyeda_layer_id(layer.target);
+        let mut layer_paths = Vec::new();
         for fill in polygonize_mask(&layer.composite, &board.grid)
             .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
         {
             // The document stores both faces in physical board coordinates.
             // Do not mirror the bottom side: JLCEDA controls bottom-view
             // mirroring; this adapter only changes the raster Y origin.
-            let paths = easyeda_paths(&fill, &board.grid, BoardToEasyedaTransform::default())
-                .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
-                .into_iter()
-                .map(|path| linear_easyeda_path(path.points_mil))
-                .collect::<Vec<_>>();
+            layer_paths.extend(
+                easyeda_paths(&fill, &board.grid, BoardToEasyedaTransform::default())
+                    .map_err(|error| EasyedaPublicError::MalformedRecord(error.to_string()))?
+                    .into_iter()
+                    .map(|path| linear_easyeda_path(path.points_mil)),
+            );
+        }
+        if !layer_paths.is_empty() {
             push_record(
                 &mut records,
                 json!({"type":"FILL", "ticket":ticket, "id":format!("e{primitive_id}")}),
-                json!({"partitionId":"","groupId":0,"netName":"","layerId":layer_id,"width":0.2,"fillStyle":"SOLID","path":paths,"locked":false,"zIndex":primitive_id+1,"isBridgingCopper":false,"networkList":[],"refs":[]}),
+                json!({"partitionId":"","groupId":0,"netName":"","layerId":layer_id,"width":0.2,"fillStyle":"SOLID","path":layer_paths,"locked":false,"zIndex":primitive_id+1,"isBridgingCopper":false,"networkList":[],"refs":[]}),
             )?;
             ticket += 1;
             primitive_id += 1;
