@@ -24,11 +24,14 @@
   "warmProxyPixelPitchUm": 250,
   "previewSamples": 30,
   "burstGenerations": 60,
+  "resizeBurstGenerations": 20,
+  "resizeBurstSmoothingRadiusUm": 8000,
   "dragFrameSamples": 300,
   "timingBoundary": "input dispatch to matching generation PNG response and headless Chrome createImageBitmap completion",
   "targetsMs": {
     "inputP95": 16.7,
     "drawablePreviewP95": 120,
+    "resizeBurstLatest": 250,
     "dragFrameP95": 16.7
   },
   "baselineMachine": {

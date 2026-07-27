@@ -11,6 +11,7 @@ import {
   getInteractiveProxyCacheKey,
   getTranslatedSelectionTransforms,
   isVisibleInProductionContext,
+  mergeAvailableProxyImages,
   resolveTransformerKeepRatio,
   shouldClearCanvasSelection,
 } from "@/features/workspace/WorkspaceCanvas";
@@ -210,6 +211,37 @@ describe("fit board viewport", () => {
 });
 
 describe("interactive production proxy cache", () => {
+  it("keeps the last drawable proxy until a refreshed proxy is ready", () => {
+    const previous = new Map([
+      ["image-a", "old-a"],
+      ["image-b", "old-b"],
+    ]);
+
+    expect(
+      mergeAvailableProxyImages(previous, ["image-a", "image-b"], [
+        ["image-b", "new-b"],
+      ]),
+    ).toEqual(
+      new Map([
+        ["image-a", "old-a"],
+        ["image-b", "new-b"],
+      ]),
+    );
+  });
+
+  it("drops retained proxies only after their source layer is removed", () => {
+    expect(
+      mergeAvailableProxyImages(
+        new Map([
+          ["removed", "old"],
+          ["active", "old-active"],
+        ]),
+        ["active"],
+        [],
+      ),
+    ).toEqual(new Map([["active", "old-active"]]));
+  });
+
   it("increases mask density as the user zooms in", () => {
     expect(getAdaptiveProxyPixelPitchUm(0.5)).toBe(250);
     expect(getAdaptiveProxyPixelPitchUm(1)).toBe(100);

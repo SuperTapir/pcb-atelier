@@ -337,7 +337,8 @@ pub fn compile_prepared_image_with_cancel(
             width_px,
             height_px,
             recipe.smoothing_radius_um.div_ceil(request.pixel_pitch_um),
-        );
+            &mut cancelled,
+        )?;
     }
     check_cancelled(&mut cancelled)?;
 
@@ -539,31 +540,85 @@ fn otsu_threshold(values: &[u8]) -> u8 {
     best_threshold
 }
 
-fn majority_smooth(source: &[bool], width: u32, height: u32, radius: u32) -> Vec<bool> {
+fn majority_smooth(
+    source: &[bool],
+    width: u32,
+    height: u32,
+    radius: u32,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<bool>, TreatmentCompileError> {
     if radius == 0 {
-        return source.to_vec();
+        return Ok(source.to_vec());
     }
-    let mut result = source.to_vec();
+
+    // Build horizontal window counts once, then maintain the vertical window
+    // as a sliding sum. This preserves the clipped-edge majority semantics of
+    // the reference implementation while reducing O(pixels * radius^2) work
+    // to O(pixels).
+    let mut horizontal_counts = vec![0_u32; source.len()];
     for y in 0..height {
+        if y % 16 == 0 {
+            check_cancelled(cancelled)?;
+        }
+        let row_start = index(width, 0, y);
+        let mut active = (0..=radius.min(width - 1))
+            .map(|x| u32::from(source[row_start + x as usize]))
+            .sum::<u32>();
         for x in 0..width {
-            let mut active = 0_u32;
-            let mut total = 0_u32;
-            let y_min = y.saturating_sub(radius);
-            let y_max = y.saturating_add(radius).min(height - 1);
-            let x_min = x.saturating_sub(radius);
-            let x_max = x.saturating_add(radius).min(width - 1);
-            for sample_y in y_min..=y_max {
-                for sample_x in x_min..=x_max {
-                    if source[index(width, sample_x, sample_y)] {
-                        active += 1;
-                    }
-                    total += 1;
-                }
+            horizontal_counts[row_start + x as usize] = active;
+            if x >= radius {
+                active -= u32::from(source[row_start + (x - radius) as usize]);
             }
-            result[index(width, x, y)] = active * 2 >= total;
+            let incoming = u64::from(x) + u64::from(radius) + 1;
+            if incoming < u64::from(width) {
+                active += u32::from(source[row_start + incoming as usize]);
+            }
         }
     }
-    result
+
+    let initial_bottom = radius.min(height - 1);
+    let mut column_sums = vec![0_u64; width as usize];
+    for sample_y in 0..=initial_bottom {
+        if sample_y % 16 == 0 {
+            check_cancelled(cancelled)?;
+        }
+        let row_start = index(width, 0, sample_y);
+        for x in 0..width as usize {
+            column_sums[x] += u64::from(horizontal_counts[row_start + x]);
+        }
+    }
+
+    let mut result = source.to_vec();
+    for y in 0..height {
+        if y % 16 == 0 {
+            check_cancelled(cancelled)?;
+        }
+        let y_min = y.saturating_sub(radius);
+        let y_max = y.saturating_add(radius).min(height - 1);
+        let vertical_span = u64::from(y_max - y_min + 1);
+        let row_start = index(width, 0, y);
+        for x in 0..width {
+            let x_min = x.saturating_sub(radius);
+            let x_max = x.saturating_add(radius).min(width - 1);
+            let total = u64::from(x_max - x_min + 1) * vertical_span;
+            result[row_start + x as usize] = column_sums[x as usize] * 2 >= total;
+        }
+
+        if y >= radius {
+            let outgoing_start = index(width, 0, y - radius);
+            for x in 0..width as usize {
+                column_sums[x] -= u64::from(horizontal_counts[outgoing_start + x]);
+            }
+        }
+        let incoming = u64::from(y) + u64::from(radius) + 1;
+        if incoming < u64::from(height) {
+            let incoming_start = index(width, 0, incoming as u32);
+            for x in 0..width as usize {
+                column_sums[x] += u64::from(horizontal_counts[incoming_start + x]);
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn remove_small_islands(
@@ -884,4 +939,66 @@ fn has_bounded_gap_runs(
 
 fn index(width: u32, x: u32, y: u32) -> usize {
     (u64::from(y) * u64::from(width) + u64::from(x)) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn naive_majority_smooth(source: &[bool], width: u32, height: u32, radius: u32) -> Vec<bool> {
+        if radius == 0 {
+            return source.to_vec();
+        }
+        let mut result = source.to_vec();
+        for y in 0..height {
+            for x in 0..width {
+                let mut active = 0_u32;
+                let mut total = 0_u32;
+                for sample_y in y.saturating_sub(radius)..=y.saturating_add(radius).min(height - 1)
+                {
+                    for sample_x in
+                        x.saturating_sub(radius)..=x.saturating_add(radius).min(width - 1)
+                    {
+                        active += u32::from(source[index(width, sample_x, sample_y)]);
+                        total += 1;
+                    }
+                }
+                result[index(width, x, y)] = active * 2 >= total;
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn optimized_majority_smoothing_matches_reference_at_edges_and_large_radii() {
+        for width in 1..=9 {
+            for height in 1..=7 {
+                let source = (0..width * height)
+                    .map(|value| (value * 17 + width * 5 + height * 3) % 11 < 5)
+                    .collect::<Vec<_>>();
+                for radius in 0..=10 {
+                    let actual =
+                        majority_smooth(&source, width, height, radius, &mut || false).unwrap();
+                    assert_eq!(
+                        actual,
+                        naive_majority_smooth(&source, width, height, radius),
+                        "width={width}, height={height}, radius={radius}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn majority_smoothing_can_cancel_inside_the_operation() {
+        let source = vec![true; 512 * 512];
+        let mut checks = 0;
+        let result = majority_smooth(&source, 512, 512, 64, &mut || {
+            checks += 1;
+            checks >= 2
+        });
+
+        assert!(matches!(result, Err(TreatmentCompileError::Cancelled)));
+        assert_eq!(checks, 2);
+    }
 }

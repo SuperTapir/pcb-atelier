@@ -96,6 +96,30 @@ try {
   if (finalBurst.error) {
     throw new Error(`final generation failed: ${finalBurst.error}`);
   }
+  const resizeBurstStarted = performance.now();
+  const resizeBurst = Array.from({ length: 20 }, (_, index) =>
+    invokeAllowCancellation(
+      request("request_image_preview", {
+        sourceHandle: source.sourceHandle,
+        previewStreamId: "interactive-image-resize-v1",
+        generation: index + 1,
+        workspaceRevision: source.workspaceRevision,
+        recipe: {
+          ...baseRecipe,
+          smoothingRadiusUm: 8_000,
+        },
+        physicalWidthUm: 160_000 - index * 2_000,
+        physicalHeightUm: 250_000 - index * 3_000,
+        pixelPitchUm: 250,
+      }),
+    ),
+  );
+  const resizeBurstResults = await Promise.all(resizeBurst);
+  const resizeBurstLatestMs = performance.now() - resizeBurstStarted;
+  const finalResize = resizeBurstResults.at(-1);
+  if (finalResize.error) {
+    throw new Error(`final resize generation failed: ${finalResize.error}`);
+  }
   const diagnostics = await invoke(
     request("get_image_preview_diagnostics", undefined),
   );
@@ -123,11 +147,20 @@ try {
     inputDispatchP95Ms: percentile(inputDispatchMs, 0.95),
     finalGenerationAccepted: !finalBurst.error,
     cancelledBurstRequests: burstResults.filter((entry) => entry.error).length,
+    resizeBurstLatestMs: Number(resizeBurstLatestMs.toFixed(2)),
+    cancelledResizeRequests: resizeBurstResults.filter((entry) => entry.error)
+      .length,
+    resizeOutput: {
+      widthPx: finalResize.payload.widthPx,
+      heightPx: finalResize.payload.heightPx,
+    },
     diagnostics,
   };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (result.drawableP95Ms > 120) process.exitCode = 1;
   if (result.inputDispatchP95Ms > 16.7) process.exitCode = 1;
+  if (result.resizeBurstLatestMs > 250) process.exitCode = 1;
+  if (result.cancelledResizeRequests < 18) process.exitCode = 1;
   if (diagnostics.prepareCount !== 1) process.exitCode = 1;
   if (diagnostics.sourceBytes !== bytes.length) process.exitCode = 1;
 } finally {

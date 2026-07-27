@@ -1229,10 +1229,9 @@ function useProductionProxyImages(
     const urls: string[] = [];
     const proxyReleases: Array<() => void> = [];
     const palette = getManufacturerPalette(document.manufacturerProfile);
-    void Promise.all(
-      layers
-        .filter((layer) => layer.kind.type === "image")
-        .map(async (layer) => {
+    const imageLayers = layers.filter((layer) => layer.kind.type === "image");
+    void Promise.allSettled(
+      imageLayers.map(async (layer) => {
         if (layer.kind.type !== "image") {
           throw new Error("production proxy requested for a non-image layer");
         }
@@ -1311,11 +1310,18 @@ function useProductionProxyImages(
         return [layer.id, image] as const;
       }),
     )
-      .then((entries) => {
-        if (!cancelled) setImages(new Map(entries));
-      })
-      .catch(() => {
-        if (!cancelled) setImages(new Map());
+      .then((results) => {
+        if (cancelled) return;
+        const available = results.flatMap((result) =>
+          result.status === "fulfilled" ? [result.value] : [],
+        );
+        setImages((previous) =>
+          mergeAvailableProxyImages(
+            previous,
+            imageLayers.map((layer) => layer.id),
+            available,
+          ),
+        );
       });
     return () => {
       cancelled = true;
@@ -1334,6 +1340,21 @@ function useProductionProxyImages(
     workContext,
   ]);
   return images;
+}
+
+export function mergeAvailableProxyImages<T>(
+  previous: ReadonlyMap<string, T>,
+  activeLayerIds: readonly string[],
+  available: ReadonlyArray<readonly [string, T]>,
+) {
+  const active = new Set(activeLayerIds);
+  const next = new Map(
+    [...previous].filter(([layerId]) => active.has(layerId)),
+  );
+  for (const [layerId, image] of available) {
+    if (active.has(layerId)) next.set(layerId, image);
+  }
+  return next;
 }
 
 export function getInteractiveProxyCacheKey(

@@ -38,3 +38,4 @@
 - [x] 5.4 用非对称、孔洞、孤岛、细线和裁切 fixture 比较交互代理、正式 mask、3D 与 EasyEDA 输出；验证可表达结构的指纹、方向、极性、拓扑和边界误差，细于两个代理像素的结构只影响粗代理可见性，并断言 draft 不进入 3D、同 revision 的 2D/3D 只解析一次且哈希相同
 - [x] 5.5 运行 Rust workspace、前端单测、typecheck、production build、完整 Playwright、Tauri benchmark、OpenSpec strict 和 `git diff --check`
 - [x] 5.6 删除旧的完整字节重复预览接口与兼容回退，记录 PNG 编码/base64/客户端解码占比及首轮传输决策，更新性能基线和架构文档，确认当前未发布 schema 不保留迁移分支
+- [ ] 5.7 根据 24 FPS 真实录屏复现缩放提交后 3–9 秒代理空窗：平滑改为等价线性时间滑动窗口并支持操作内行块取消，代理刷新期间保留上一张可绘制纹理；增加 20 次尺寸/重平滑 burst 回归并完成全量验证
