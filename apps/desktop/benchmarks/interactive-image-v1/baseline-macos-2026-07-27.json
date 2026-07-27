@@ -1,6 +1,6 @@
 {
   "profile": "interactive-image-v1",
-  "applicationCommit": "5d4c7c2928c6a2f06716e2e01b7e6a9673f81967",
+  "applicationCommit": "42aced3bf00ba8a2e180860044989da30c599d17",
   "fixtureSha256": "345cff9a3b506870742e6ad78d4e6b28aa01d0c4274488330c12b5755099680f",
   "sourceBytes": 136309,
   "beginJsonBytes": 481913,
@@ -10,8 +10,10 @@
     "heightPx": 320
   },
   "samples": 30,
-  "p50Ms": 2.97,
-  "p95Ms": 3.71,
+  "bridgeP95Ms": 3.87,
+  "drawableP50Ms": 5.04,
+  "drawableP95Ms": 6.26,
+  "inputDispatchP95Ms": 0.16,
   "burstGenerations": 60,
   "cancelledBurstRequests": 59,
   "finalGenerationAccepted": true,
@@ -19,7 +21,7 @@
     "sourceBytes": 136309,
     "prepareCount": 1,
     "proxyCompileCount": 32,
-    "cancelCount": 64,
+    "cancelCount": 66,
     "coalesceCount": 0,
     "active": 0,
     "pending": 0,
@@ -28,6 +30,6 @@
   "encodingDecision": {
     "transport": "PNG data URL",
     "reason": "source registration removes the dominant repeated JSON/decode cost; binary transport remains deferred until browser texture-decode profiling shows PNG encode, base64 and client decode exceed 20% of the 120 ms budget",
-    "measuredBreakdown": "bridge benchmark currently measures compile plus PNG encode, base64, HTTP and response parse as one 3.71 ms p95 boundary; browser E2E is the authority for decoded drawable timing"
+    "measuredBreakdown": "bridge compile, PNG encode, base64, HTTP and response parse are 3.87 ms p95; the same 30 samples reach headless Chrome createImageBitmap completion at 6.26 ms p95"
   }
 }

@@ -100,13 +100,15 @@ Mac13,1 / Apple M1 Max / macOS 26.5.2 / AC 实测：
 - 源 PNG `136,309 bytes`；一次性 begin JSON `481,913 bytes`；
 - 后续预览 JSON `602 bytes`，不含源图；
 - prepared source `1` 次，60 次 burst 取消 `59` 个陈旧请求；
-- 205×320 代理的 30 个非缓存结果 `p50 2.97 ms / p95 3.71 ms`；
+- 205×320 代理的 30 个非缓存结果：bridge `p95 3.87 ms`，到 headless
+  Chrome `createImageBitmap` 可绘制完成 `p50 5.04 ms / p95 6.26 ms`；
+- 60 次 burst 的前端请求派发 `p95 0.16 ms`；
 - 完整结果见
   [`baseline-macos-2026-07-27.json`](./interactive-image-v1/baseline-macos-2026-07-27.json)。
 
-bridge 数字包含 Rust 处理、PNG 编码、base64、HTTP 和 JSON 解析，但不包含浏览器
-`Image.decode()`/纹理可绘制边界；浏览器 E2E 和 Tauri 手势基准继续负责 120 ms
-drawable feedback 与 16.7 ms 拖动帧目标。首轮保留 PNG data URL：当前整体边界只占
+bridge 数字包含 Rust 处理、PNG 编码、base64、HTTP 和 JSON 解析；drawable 数字再
+包含 Chrome `createImageBitmap`。浏览器 E2E 和 Tauri 手势基准继续覆盖真实编辑流程
+与 16.7 ms 拖动目标。首轮保留 PNG data URL：当前整体边界只占
 120 ms 预算的一小部分；若浏览器分段 profile 证明 PNG 编码、base64 和客户端解码合计
 超过 20%，再切换二进制响应或受控资源 URL。
 

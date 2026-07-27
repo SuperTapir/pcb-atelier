@@ -1,6 +1,6 @@
 {
   "profile": "interactive-image-v1",
-  "applicationCommit": "5d4c7c2928c6a2f06716e2e01b7e6a9673f81967",
+  "applicationCommit": "42aced3bf00ba8a2e180860044989da30c599d17",
   "fixtures": [
     {
       "path": "fixtures/tauri-editor-1003x1568.png",
@@ -25,7 +25,7 @@
   "previewSamples": 30,
   "burstGenerations": 60,
   "dragFrameSamples": 300,
-  "timingBoundary": "input dispatch to matching generation PNG response; browser E2E extends the endpoint to decoded drawable texture",
+  "timingBoundary": "input dispatch to matching generation PNG response and headless Chrome createImageBitmap completion",
   "targetsMs": {
     "inputP95": 16.7,
     "drawablePreviewP95": 120,

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { chromium } from "@playwright/test";
 
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = resolve(desktopRoot, "../..");
@@ -21,9 +22,12 @@ const bridge = spawn(
     stdio: ["ignore", "ignore", "inherit"],
   },
 );
+let browser;
 
 try {
   await waitForHealth();
+  browser = await chromium.launch({ channel: "chrome", headless: true });
+  const page = await browser.newPage();
   const bytes = [...(await readFile(fixturePath))];
   const beginRequest = request("begin_image_preview_source", {
     bytes,
@@ -61,14 +65,31 @@ try {
 
   await invoke(makePreview(1, 96));
   const latenciesMs = [];
+  const bridgeLatenciesMs = [];
   for (let sample = 0; sample < 30; sample += 1) {
     const started = performance.now();
-    await invoke(makePreview(sample + 2, 97 + sample, sample % 2 === 1));
+    const report = await invoke(
+      makePreview(sample + 2, 97 + sample, sample % 2 === 1),
+    );
+    bridgeLatenciesMs.push(performance.now() - started);
+    await page.evaluate(async (dataUrl) => {
+      const response = await fetch(dataUrl);
+      const bitmap = await createImageBitmap(await response.blob());
+      bitmap.close();
+    }, report.previewPngDataUrl);
     latenciesMs.push(performance.now() - started);
   }
 
+  const inputDispatchMs = [];
   const burst = Array.from({ length: 60 }, (_, index) =>
-    invokeAllowCancellation(makePreview(index + 32, 140 + index)),
+    (() => {
+      const started = performance.now();
+      const pending = invokeAllowCancellation(
+        makePreview(index + 32, 140 + index),
+      );
+      inputDispatchMs.push(performance.now() - started);
+      return pending;
+    })(),
   );
   const burstResults = await Promise.all(burst);
   const finalBurst = burstResults.at(-1);
@@ -96,17 +117,21 @@ try {
       heightPx: finalBurst.payload.heightPx,
     },
     samples: latenciesMs.length,
-    p50Ms: percentile(latenciesMs, 0.5),
-    p95Ms: percentile(latenciesMs, 0.95),
+    bridgeP95Ms: percentile(bridgeLatenciesMs, 0.95),
+    drawableP50Ms: percentile(latenciesMs, 0.5),
+    drawableP95Ms: percentile(latenciesMs, 0.95),
+    inputDispatchP95Ms: percentile(inputDispatchMs, 0.95),
     finalGenerationAccepted: !finalBurst.error,
     cancelledBurstRequests: burstResults.filter((entry) => entry.error).length,
     diagnostics,
   };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  if (result.p95Ms > 120) process.exitCode = 1;
+  if (result.drawableP95Ms > 120) process.exitCode = 1;
+  if (result.inputDispatchP95Ms > 16.7) process.exitCode = 1;
   if (diagnostics.prepareCount !== 1) process.exitCode = 1;
   if (diagnostics.sourceBytes !== bytes.length) process.exitCode = 1;
 } finally {
+  await browser?.close();
   bridge.kill("SIGTERM");
 }
 
